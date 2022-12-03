@@ -1,0 +1,7 @@
+client/target
+client/Cargo.lock
+server/target
+server/Cargo.lock
+shared/target
+shared/Cargo.lock
+shared/comments.rs

@@ -1,0 +1,20 @@
+[package]
+name = "place-rs-shared"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0.148", features = ["derive"] }
+dirs = "4.0.0"
+anyhow = "1.0.66"
+serde_json = "1.0.89"
+chrono = "0.4.23"
+tokio = { version = "1.22.0", features = ["full"] }
+poll-promise = "0.2.0"
+# tokio-postgres = "0.7.7"
+async-trait = "0.1.59"
+# oxidizer = "0.2.0"
+# async-postgres = "0.5.1"
+sqlx = { version = "0.6.2", features = ["runtime-tokio-rustls", "macros", "chrono", "uuid", "offline", "postgres"] }
