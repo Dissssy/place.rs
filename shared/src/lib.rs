@@ -41,6 +41,8 @@ pub struct WebsocketHandler {
 pub enum WebsocketMessage {
     Pixel(Pixel),
     User(User),
+    Heartbeat,
+    Listening,
 }
 
 impl Place {
@@ -556,4 +558,13 @@ fn safe_getter<T: std::str::FromStr>(value: Option<T>, prompt: &str) -> T {
 
 fn get_data_path() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from_str("./").unwrap()).join("place_rs")
+}
+
+#[derive(Deserialize, Debug, Serialize)]
+pub enum RawWebsocketMessage {
+    PixelUpdate { location: XY, color: Color },
+    Heartbeat,
+    Error { message: String },
+    Listen,
+    SetUsername(String),
 }

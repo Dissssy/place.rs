@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
 use actix_web::{get, web, App, HttpServer, Responder};
-use place_rs_shared::{Color, Pixel, Place, ServerConfig, User, XY};
+use place_rs_shared::{Color, Pixel, Place, RawWebsocketMessage, ServerConfig, User, XY};
 
 #[get("/api/canvas/{x}/{y}")]
 async fn api_canvas(data: web::Data<Arc<Mutex<Place>>>, coord: web::Path<(usize, usize)>) -> impl Responder {
@@ -133,7 +133,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                 let msg = serde_json::from_str::<RawWebsocketMessage>(&text);
                 if let Ok(msg) = msg {
                     match msg {
-                        RawWebsocketMessage::PixelUpdate { x, y, color } => {
+                        RawWebsocketMessage::PixelUpdate { location, color } => {
                             if self.rx.is_some() {
                                 ctx.text("Initialise the listener first");
                                 return;
@@ -142,7 +142,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                             if let Some(user) = user {
                                 let time = chrono::Utc::now().timestamp();
                                 let pixel = Pixel {
-                                    location: XY { x, y },
+                                    location,
                                     color,
                                     timestamp: Some(time),
                                     user,
@@ -189,11 +189,12 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                         if act.heartbeats > 5 {
                                             ctx.stop();
                                         } else {
-                                            ctx.text("BeatHeart");
+                                            ctx.text(serde_json::to_string(&WebsocketMessage::Heartbeat).unwrap());
                                         }
                                     }
                                 });
-                                ctx.text("Listening");
+                                let listeningmsg = WebsocketMessage::Listening;
+                                ctx.text(serde_json::to_string(&listeningmsg).unwrap());
                                 // let (mtx, mut mrx) = tokio::sync::mpsc::unbounded_channel::<String>();
                                 // let (ktx, mut krx) = tokio::sync::oneshot::channel::<()>();
                                 // let _: Promise<()> = Promise::spawn_thread(format!("listener:{}", self.ip), move || {
@@ -270,20 +271,6 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
             _ => ctx.stop(),
         }
     }
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-enum RawWebsocketMessage {
-    PixelUpdate { x: usize, y: usize, color: Color },
-    Heartbeat,
-    Error { message: String },
-    Listen,
-    SetUsername(String),
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-struct Msg {
-    raw: RawWebsocketMessage,
 }
 
 fn hash(s: String) -> String {
