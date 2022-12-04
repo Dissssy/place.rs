@@ -120,6 +120,10 @@ async fn ws_index(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mu
 // #[async_trait::async_trait]
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
+        if self.rx.is_none() {
+            ctx.text("Initialise the listener first");
+            return;
+        }
         match msg {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => {
