@@ -76,6 +76,7 @@ struct MyWs {
     id: String,
     user: Option<User>,
     lasthb: std::time::Instant,
+    heartbeats: i64,
 }
 
 impl MyWs {
@@ -83,6 +84,7 @@ impl MyWs {
         let now = std::time::Instant::now();
         if now.duration_since(self.lasthb) > std::time::Duration::from_secs(5) {
             self.lasthb = now;
+            self.heartbeats += 1;
             return true;
         }
         false
@@ -109,6 +111,7 @@ async fn ws_index(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mu
         user,
         id,
         lasthb: std::time::Instant::now(),
+        heartbeats: 0,
     };
     ws::start(myws, &req, stream)
 }
@@ -154,7 +157,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                         }
                         RawWebsocketMessage::Heartbeat => {
                             // send the heartbeat to the websocket
-                            ctx.text("BeatHeart");
+                            self.heartbeats = 0;
                         }
                         RawWebsocketMessage::Listen => {
                             // check if the handle is already set, if it is, return an error message
@@ -172,6 +175,9 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                     // check if a heartbeat needs to be sent (every 5 seconds)
                                     if act.heartbeat() {
                                         ctx.text("BeatHeart");
+                                        if act.heartbeats > 5 {
+                                            ctx.stop();
+                                        }
                                     }
                                     // check if there is a message in the channel
                                     if let Ok(msg) = rx.try_recv() {
