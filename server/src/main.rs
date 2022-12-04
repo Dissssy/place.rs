@@ -61,6 +61,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(stop_handle)
             .service(api_canvas)
             .service(api_info)
+            .service(stop)
             .route("/ws/", web::get().to(ws_index))
     })
     .bind((config.host, config.port))?
