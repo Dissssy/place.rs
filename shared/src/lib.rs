@@ -47,6 +47,9 @@ pub enum WebsocketMessage {
 }
 
 impl Place {
+    pub fn get_user(&self, id: &str) -> Option<&User> {
+        self.users.iter().find(|user| user.id == id)
+    }
     pub async fn load() -> Result<Self, Error> {
         let config = ServerConfig::load()?;
         let p: Box<dyn Handler> = match config.handler {

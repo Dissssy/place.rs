@@ -44,6 +44,13 @@ async fn stop(stop_handle: web::Data<StopHandle>) -> HttpResponse {
     HttpResponse::NoContent().finish()
 }
 
+#[get("/api/user/{id}")]
+async fn api_user(data: web::Data<Arc<Mutex<Place>>>, id: web::Path<String>) -> impl Responder {
+    let data = data.lock().await;
+    let user = data.get_user(&id).cloned();
+    web::Json(user)
+}
+
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let config = ServerConfig::load().unwrap();
