@@ -34,11 +34,12 @@ impl Clone for Place {
 pub struct WebsocketHandler {
     pub id: String,
     pub handle: UnboundedSender<WebsocketMessage>,
+    pub closed: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WebsocketMessage {
-    Update(Pixel),
+    Pixel(Pixel),
     User(User),
 }
 
@@ -105,12 +106,12 @@ impl Place {
         *pixel = newpixel.clone();
 
         for websocket in self.websockets.iter_mut() {
-            let r = websocket.handle.send(WebsocketMessage::Update(newpixel.clone()));
-            if let Err(e) = r {
-                println!("Error sending websocket message: {}", e);
+            let r = websocket.handle.send(WebsocketMessage::Pixel(newpixel.clone()));
+            if r.is_err() {
+                websocket.closed = true;
             }
         }
-        self.websockets.retain(|websocket| !websocket.handle.is_closed());
+        self.websockets.retain(|websocket| !websocket.closed);
 
         if let Some(user) = user {
             user.timeout = thisnow + self.config.timeout;
@@ -127,7 +128,11 @@ impl Place {
         Ok(())
     }
     pub fn add_websocket(&mut self, id: String, handle: UnboundedSender<WebsocketMessage>) -> Option<User> {
-        self.websockets.push(WebsocketHandler { id: id.clone(), handle });
+        self.websockets.push(WebsocketHandler {
+            id: id.clone(),
+            handle,
+            closed: false,
+        });
         self.users.iter().find(|user| user.id == id).cloned()
     }
     pub fn remove_websocket(&mut self, id: String) {
@@ -152,11 +157,11 @@ impl Place {
             }
             for websocket in self.websockets.iter_mut() {
                 let r = websocket.handle.send(WebsocketMessage::User(user.clone()));
-                if let Err(e) = r {
-                    println!("Error sending websocket message: {}", e);
+                if r.is_err() {
+                    websocket.closed = true;
                 }
             }
-            self.websockets.retain(|websocket| !websocket.handle.is_closed());
+            self.websockets.retain(|websocket| !websocket.closed);
             Ok(())
         } else {
             Err(anyhow!("User not found"))
