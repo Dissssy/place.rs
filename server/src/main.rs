@@ -75,6 +75,18 @@ struct MyWs {
     rx: Option<UnboundedReceiver<WebsocketMessage>>,
     id: String,
     user: Option<User>,
+    lasthb: std::time::Instant,
+}
+
+impl MyWs {
+    pub fn heartbeat(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.lasthb) > std::time::Duration::from_secs(5) {
+            self.lasthb = now;
+            return true;
+        }
+        false
+    }
 }
 
 impl Actor for MyWs {
@@ -91,7 +103,13 @@ async fn ws_index(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mu
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let id = hash(req.peer_addr().unwrap().ip().to_string());
     let user = place.lock().await.add_websocket(id.clone(), tx);
-    let myws = MyWs { place, rx: Some(rx), user, id };
+    let myws = MyWs {
+        place,
+        rx: Some(rx),
+        user,
+        id,
+        lasthb: std::time::Instant::now(),
+    };
     ws::start(myws, &req, stream)
 }
 
@@ -143,13 +161,17 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
 
                             let rx = self.rx.take();
                             if let Some(mut rx) = rx {
-                                ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
+                                ctx.run_interval(std::time::Duration::from_millis(100), move |act, ctx| {
                                     // check if the websocket is still connected
                                     if !ctx.state().alive() {
                                         // if it is not, remove the websocket from the place
                                         // act.place.lock().await.remove_websocket(hash(act.id.clone()));
                                         ctx.stop();
                                         return;
+                                    }
+                                    // check if a heartbeat needs to be sent (every 5 seconds)
+                                    if act.heartbeat() {
+                                        ctx.text("BeatHeart");
                                     }
                                     // check if there is a message in the channel
                                     if let Ok(msg) = rx.try_recv() {
