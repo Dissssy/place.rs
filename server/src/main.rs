@@ -77,6 +77,7 @@ struct MyWs {
     user: Option<User>,
     lasthb: std::time::Instant,
     heartbeats: i64,
+    timeout: i64,
 }
 
 impl MyWs {
@@ -105,6 +106,7 @@ async fn ws_index(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mu
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let id = hash(req.peer_addr().unwrap().ip().to_string());
     let user = place.lock().await.add_websocket(id.clone(), tx);
+    let config = ServerConfig::load().unwrap();
     let myws = MyWs {
         place,
         rx: Some(rx),
@@ -112,6 +114,7 @@ async fn ws_index(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mu
         id,
         lasthb: std::time::Instant::now(),
         heartbeats: 0,
+        timeout: config.username_timeout,
     };
     ws::start(myws, &req, stream)
 }
@@ -226,9 +229,17 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                 ctx.text(err);
                                 return;
                             }
+                            let now = chrono::Utc::now().timestamp();
+                            // if the users timeout is less than the current time then error
                             if let Some(mut user) = self.user.clone() {
+                                if user.timeout > now {
+                                    let err = serde_json::to_string(&WebsocketMessage::Error("You are timed out".to_string())).unwrap();
+                                    ctx.text(err);
+                                    return;
+                                }
                                 let (tx, mut rx) = oneshot::channel::<String>();
                                 user.name = username;
+                                user.username_timeout = now + self.timeout;
                                 let f = wrap_future(set_username(user, self.place.clone(), tx));
                                 ctx.spawn(f);
                                 ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
@@ -240,6 +251,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                 self.user = Some(User {
                                     name: username,
                                     id: self.id.clone(),
+                                    username_timeout: now + self.timeout,
                                     timeout: 0,
                                 });
                             }

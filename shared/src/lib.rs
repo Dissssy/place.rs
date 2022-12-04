@@ -293,6 +293,7 @@ impl Handler for PostgresHandler {
                         id,
                         timeout: rtimestamp as i64,
                         name: row.get("user_name"),
+                        username_timeout: rtimestamp as i64,
                     };
                     users.push(user);
                     *tpixel = pixel.clone();
@@ -395,6 +396,7 @@ pub struct User {
     pub name: String,
     pub id: String,
     pub timeout: i64,
+    pub username_timeout: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -430,6 +432,7 @@ pub struct ServerConfig {
     pub handler: HandlerType,
     pub timeout: i64,
     pub chunk_size: usize,
+    pub username_timeout: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,6 +443,7 @@ struct ServerConfigGetting {
     handler: Option<HandlerType>,
     timeout: Option<i64>,
     chunk_size: Option<usize>,
+    username_timeout: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -503,6 +507,7 @@ impl ServerConfig {
                         timeout: None,
                         chunk_size: None,
                         size: None,
+                        username_timeout: None,
                     }
                 }
             },
@@ -515,6 +520,7 @@ impl ServerConfig {
                     timeout: None,
                     chunk_size: None,
                     size: None,
+                    username_timeout: None,
                 }
             }
         };
@@ -528,6 +534,7 @@ impl ServerConfig {
                 x: safe_getter(config_getting.size.map(|x| x.x), "Input width: "),
                 y: safe_getter(config_getting.size.map(|x| x.y), "Input height: "),
             },
+            username_timeout: safe_getter(config_getting.username_timeout, "Input username timeout: "),
         };
 
         let mut file = std::fs::File::create(&config_path)?;
