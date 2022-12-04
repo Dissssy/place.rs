@@ -1,3 +1,4 @@
+use std::fmt::Formatter;
 use std::io;
 
 // hashmap
@@ -80,6 +81,7 @@ impl TX {
                 let filename = args.next().ok_or_else(|| anyhow!("No filename"))?;
                 Ok(TX::Meta(Meta::Export(filename.to_string())))
             }
+            "info" => Ok(TX::Meta(Meta::Info)),
             "help" => Err(anyhow!("Commands: \n\tpaint <x> <y> <r> <g> <b> \n\tnick <name>")),
             _ => {
                 // unknown command
@@ -269,7 +271,6 @@ impl std::fmt::Display for WebsocketError {
     }
 }
 
-#[derive(Debug)]
 struct PlaceClient {
     client: WebSocketHandler,
     place: Vec<Vec<Pixel>>,
@@ -277,7 +278,19 @@ struct PlaceClient {
     server_info: SafeInfo,
     chunks_loaded: Vec<Vec<bool>>,
     image_task: Option<(String, JoinHandle<Result<DynamicImage, Error>>)>,
-    update_task: Option<JoinHandle<()>>,
+}
+
+// impl debug, printing everything except the place vec
+impl std::fmt::Debug for PlaceClient {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlaceClient")
+            .field("client", &self.client)
+            .field("users", &self.users)
+            .field("server_info", &self.server_info)
+            .field("chunks_loaded", &self.chunks_loaded)
+            .field("image_task", &self.image_task)
+            .finish()
+    }
 }
 
 impl PlaceClient {
@@ -293,7 +306,6 @@ impl PlaceClient {
             server_info: info,
             chunks_loaded,
             image_task: None,
-            update_task: None,
         };
         client.get_pixel_data().await?;
         Ok(client)
@@ -306,6 +318,7 @@ impl PlaceClient {
         // and we will be filling out the users vector with the user data
         // using the /api/users/{id} endpoint
         // the user id will come from the pixel data
+        let mut users = Vec::new();
         for (y, r) in self.chunks_loaded.iter_mut().enumerate() {
             for (x, b) in r.iter_mut().enumerate() {
                 println!("Loading chunk: {}, {}", x, y);
@@ -313,7 +326,6 @@ impl PlaceClient {
                 let chunk = get_chunk(y, x).await?;
                 // println!("{:?}", chunk);
                 // fill out the place vector with the chunk data
-                let mut users = Vec::new();
                 for pixel in chunk {
                     let location = pixel.location;
                     self.place[location.y][location.x] = pixel.clone();
@@ -322,12 +334,15 @@ impl PlaceClient {
                     }
                 }
                 // fill out the users vector with the user data
-                for user in users {
-                    self.users.get(&user).await?;
-                }
                 // set the chunk to loaded
                 *b = true;
             }
+        }
+        // filter duplicates
+        users.sort();
+        users.dedup();
+        for user in users {
+            self.get_user(&user).await?;
         }
         Ok(())
     }
@@ -375,7 +390,7 @@ impl PlaceClient {
         }
         if let Some((filename, task)) = &mut self.image_task {
             if let Ok(Ok(image)) = task.await {
-                image.save(filename)?;
+                image.save(format!("{}.png", filename))?;
                 self.image_task = None;
             }
         }
@@ -425,10 +440,10 @@ impl LazyUserMap {
             let url = format!("https://place.planetfifty.one/api/user/{}", id);
             println!("Requesting user data from {}", url);
             let resp = reqwest::get(&url).await?;
-            println!("{}", resp.text().await?);
-            // let user: User = resp.json().await?;
-            // Ok(user)
-            Err(anyhow!("User not found"))
+            // println!("{}", resp.text().await?);
+            let user = resp.json().await;
+            user.map_err(|e| e.into())
+            // Err(anyhow!("User not found"))
         }
     }
     fn put(&mut self, id: String, user: User) {

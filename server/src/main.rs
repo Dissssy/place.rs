@@ -46,11 +46,11 @@ async fn stop(stop_handle: web::Data<StopHandle>) -> HttpResponse {
 
 #[get("/api/user/{id}")]
 async fn api_user(data: web::Data<Arc<Mutex<Place>>>, id: web::Path<String>) -> impl Responder {
-    println!("{}", id);
+    // println!("{}", id);
     let data = data.lock().await;
     let user = data.get_user(&id).cloned();
-    println!("{:?}", user);
-    println!("{:?}", data.users);
+    // println!("{:?}", user);
+    // println!("{:?}", data.users);
     web::Json(user)
 }
 
