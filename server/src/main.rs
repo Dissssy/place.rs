@@ -232,7 +232,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                             let now = chrono::Utc::now().timestamp();
                             // if the users timeout is less than the current time then error
                             if let Some(user) = self.user.as_mut() {
-                                if user.timeout > now {
+                                if user.username_timeout > now {
                                     let err = serde_json::to_string(&WebsocketMessage::Error("You are timed out".to_string())).unwrap();
                                     ctx.text(err);
                                     return;
@@ -255,7 +255,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                     timeout: 0,
                                 });
                             }
-                            println!("{:?}", self.user);
+                            // println!("{:?}", self.user);
                         }
                         _ => {
                             ctx.text(
