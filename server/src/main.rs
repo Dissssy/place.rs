@@ -255,6 +255,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                     timeout: 0,
                                 });
                             }
+                            println!("{:?}", self.user);
                         }
                         _ => {
                             ctx.text(
