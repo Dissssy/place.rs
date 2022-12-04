@@ -1,11 +1,14 @@
 use actix::fut::wrap_future;
 use actix::prelude::*;
+use actix_web::dev::Path;
+use actix_web::dev::ServerHandle;
 use actix_web_actors::ws;
 use place_rs_shared::SafeInfo;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
 // use sqlx::postgres::PgPoolOptions;
+use std::sync::mpsc;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
@@ -34,24 +37,37 @@ async fn api_info() -> impl Responder {
     web::Json(info)
 }
 
+// an api endpoint to restart the server, debugging purposes
+#[get("/api/restart")]
+async fn stop(stop_handle: web::Data<StopHandle>) -> HttpResponse {
+    stop_handle.stop(true);
+    HttpResponse::NoContent().finish()
+}
+
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let config = ServerConfig::load().unwrap();
     // we will run a websocket server on the same port as the http server under the /ws path, this will serve live events and updates to the client, specifically when a pixel changes, and the current timeout for the user. the user will push messages to this websocket to update a pixel
     // we will run a http server on the same port as the websocket server under the /api path, this will serve the basic api endpoints to get the current state of the canvas, to get the user up to date
     let place = Arc::new(Mutex::new(Place::load().await.unwrap()));
+    let stop_handle = web::Data::new(StopHandle::default());
+    let sandle = stop_handle.clone();
     let place_clone = place.clone();
     println!("Starting server on port {}", config.port);
     let x = HttpServer::new(move || {
+        let stop_handle = stop_handle.clone();
         App::new()
             .app_data(web::Data::new(place_clone.clone()))
+            .app_data(stop_handle)
             .service(api_canvas)
             .service(api_info)
             .route("/ws/", web::get().to(ws_index))
     })
     .bind((config.host, config.port))?
-    .run()
-    .await;
+    .run();
+    sandle.register(x.handle());
+    let x = x.await;
+
     println!("{:?}", x);
     println!("Shutting down server");
     println!("Saving canvas");
@@ -59,6 +75,26 @@ async fn main() -> std::io::Result<()> {
     println!("{:?}", place.handler.save(place.get_save_data()).await);
 
     x
+}
+
+#[derive(Default)]
+struct StopHandle {
+    inner: std::sync::Mutex<Option<ServerHandle>>,
+}
+
+impl StopHandle {
+    /// Sets the server handle to stop.
+    pub(crate) fn register(&self, handle: ServerHandle) {
+        let mut binding = self.inner.lock();
+        let t = binding.as_deref_mut().unwrap();
+        let mut handle = Some(handle);
+        std::mem::swap(t, &mut handle);
+    }
+
+    /// Sends stop signal through contained server handle.
+    pub(crate) fn stop(&self, graceful: bool) {
+        let _ = self.inner.lock().unwrap().take().unwrap().stop(graceful);
+    }
 }
 
 use actix::{Actor, StreamHandler};
