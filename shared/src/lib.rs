@@ -39,6 +39,7 @@ pub struct WebsocketHandler {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WebsocketMessage {
     Update(Pixel),
+    User(User),
 }
 
 impl Place {
@@ -149,6 +150,13 @@ impl Place {
                     }
                 }
             }
+            for websocket in self.websockets.iter_mut() {
+                let r = websocket.handle.send(WebsocketMessage::User(user.clone()));
+                if let Err(e) = r {
+                    println!("Error sending websocket message: {}", e);
+                }
+            }
+            self.websockets.retain(|websocket| !websocket.handle.is_closed());
             Ok(())
         } else {
             Err(anyhow!("User not found"))
