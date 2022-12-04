@@ -36,6 +36,10 @@ async fn main() {
                 let name = args.next().unwrap();
                 TX::Nick(name.to_string())
             }
+            "help" => {
+                println!("Commands: \n\tpaint <x> <y> <r> <g> <b> \n\tnick <name>");
+                continue;
+            }
             _ => {
                 // unknown command
                 println!("unknown command");
@@ -94,7 +98,7 @@ impl WebSocketHandler {
                     }
                     Some(msg) = ws_stream.next() => {
                         if let Ok(msg) = msg {
-                            println!("got message from server: {:?}", msg);
+                            // println!("got message from server: {:?}", msg);
                             let msg = serde_json::from_str::<WebsocketMessage>(&msg.to_string()).unwrap();
                             match msg {
                                 WebsocketMessage::Pixel(pixel) => {
@@ -107,11 +111,16 @@ impl WebSocketHandler {
                                 }
                                 WebsocketMessage::Heartbeat => {
                                     // send heartbeat back
-                                    println!("Heartbeat");
-                                    ws_stream.send(tokio_tungstenite::tungstenite::Message::Text("Heartbeat".to_string())).await.unwrap();
+                                    // println!("Heartbeat");
+                                    let heartbeat = RawWebsocketMessage::Heartbeat;
+                                    let msg = serde_json::to_string(&heartbeat).unwrap();
+                                    ws_stream.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await.unwrap();
                                 }
                                 WebsocketMessage::Listening => {
-                                    println!("Listening");
+                                    // println!("Listening");
+                                }
+                                WebsocketMessage::Error(err) => {
+                                    println!("Error: {:?}", err);
                                 }
                             }
                         }

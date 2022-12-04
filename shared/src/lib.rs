@@ -43,6 +43,7 @@ pub enum WebsocketMessage {
     User(User),
     Heartbeat,
     Listening,
+    Error(String),
 }
 
 impl Place {

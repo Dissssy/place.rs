@@ -135,7 +135,8 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                     match msg {
                         RawWebsocketMessage::PixelUpdate { location, color } => {
                             if self.rx.is_some() {
-                                ctx.text("Initialise the listener first");
+                                let err = serde_json::to_string(&WebsocketMessage::Error("Initialise the listener first".to_string())).unwrap();
+                                ctx.text(err);
                                 return;
                             }
                             let user = self.user.clone().map(LazyUser::User);
@@ -152,16 +153,19 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                 ctx.spawn(f);
                                 ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
                                     if let Ok(msg) = rx.try_recv() {
-                                        ctx.text(msg);
+                                        let err = serde_json::to_string(&WebsocketMessage::Error(msg)).unwrap();
+                                        ctx.text(err);
                                     }
                                 });
                             } else {
-                                ctx.text("You have not set a username yet");
+                                let err = serde_json::to_string(&WebsocketMessage::Error("Set a nickname first".to_string())).unwrap();
+                                ctx.text(err);
                             }
                         }
                         RawWebsocketMessage::Heartbeat => {
                             if self.rx.is_some() {
-                                ctx.text("Initialise the listener first");
+                                let err = serde_json::to_string(&WebsocketMessage::Error("Initialise the listener first".to_string())).unwrap();
+                                ctx.text(err);
                                 return;
                             }
                             // send the heartbeat to the websocket
@@ -212,17 +216,14 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                 //     }
                                 // });
                             } else {
-                                ctx.text(
-                                    serde_json::to_string(&RawWebsocketMessage::Error {
-                                        message: "Already listening".to_string(),
-                                    })
-                                    .unwrap(),
-                                );
+                                let err = serde_json::to_string(&WebsocketMessage::Error("Already listening".to_string())).unwrap();
+                                ctx.text(err);
                             }
                         }
                         RawWebsocketMessage::SetUsername(username) => {
                             if self.rx.is_some() {
-                                ctx.text("Initialise the listener first");
+                                let err = serde_json::to_string(&WebsocketMessage::Error("Initialise the listener first".to_string())).unwrap();
+                                ctx.text(err);
                                 return;
                             }
                             if let Some(mut user) = self.user.clone() {
