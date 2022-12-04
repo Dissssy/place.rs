@@ -1,57 +1,46 @@
-use std::fmt::Display;
 use std::io;
 
-use std::env;
+// hashmap
+use std::collections::HashMap;
+
+use anyhow::{anyhow, Error};
+
+use futures_util::SinkExt;
+use futures_util::StreamExt;
+use image::DynamicImage;
+use image::GenericImage;
+use image::Rgba;
+use place_rs_shared::get_blank_data;
+use place_rs_shared::RawWebsocketMessage;
+use place_rs_shared::SafeInfo;
+use place_rs_shared::WebsocketMessage;
+use place_rs_shared::{Color, Pixel, User, XY};
 use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
-
-use futures_util::SinkExt;
-use futures_util::{future, pin_mut, StreamExt};
-use place_rs_shared::RawWebsocketMessage;
-use place_rs_shared::WebsocketMessage;
-use place_rs_shared::{Color, Pixel, User, XY};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::Mutex;
-use tokio::{net::TcpStream, sync::mpsc::unbounded_channel};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use tokio_tungstenite::{tungstenite::protocol::WebSocketConfig, MaybeTlsStream, WebSocketStream};
+use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::protocol::Message;
 
 #[tokio::main]
 async fn main() {
-    let mut client = WebSocketHandler::new("wss://place.planetfifty.one/ws/").await.unwrap();
+    // let mut client = WebSocketHandler::new("wss://place.planetfifty.one/ws/").await.unwrap();
+    let mut client = PlaceClient::new().await.unwrap();
     loop {
         // read stdin for Command: <command> <args> <args> ...
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
-        let mut args = input.split_whitespace();
-        let command = args.next().unwrap();
-        let wscommand = match command {
-            "paint" => {
-                // paint <x> <y> <r> <g> <b>
-                let x = args.next().unwrap().parse::<usize>().unwrap();
-                let y = args.next().unwrap().parse::<usize>().unwrap();
-                let r = args.next().unwrap().parse::<u8>().unwrap();
-                let g = args.next().unwrap().parse::<u8>().unwrap();
-                let b = args.next().unwrap().parse::<u8>().unwrap();
-                TX::Paint(XY { x, y }, Color { r, g, b })
+        let args = input.split_whitespace().map(|x| x.to_string()).collect();
+        let wscommand = TX::parse(args);
+        match wscommand {
+            Ok(command) => {
+                client.websocket_send(command).await.unwrap();
             }
-            "nick" => {
-                // nick <name>
-                let name = args.next().unwrap();
-                TX::Nick(name.to_string())
+            Err(e) => {
+                println!("Error: {}", e);
             }
-            "help" => {
-                println!("Commands: \n\tpaint <x> <y> <r> <g> <b> \n\tnick <name>");
-                continue;
-            }
-            _ => {
-                // unknown command
-                println!("unknown command");
-                continue;
-            }
-        };
-        client = client.try_send_with_reconnect(wscommand).await.unwrap();
+        }
     }
 }
 
@@ -61,12 +50,42 @@ enum TX {
     Nick(String),
 }
 
+impl TX {
+    fn parse(strs: Vec<String>) -> Result<Self, Error> {
+        let mut args = strs.iter();
+        let command = args.next().ok_or_else(|| anyhow!("No command"))?;
+        match command.as_str() {
+            "paint" => {
+                // paint <x> <y> <r> <g> <b>
+                let x = args.next().ok_or_else(|| anyhow!("No x"))?.parse()?;
+                let y = args.next().ok_or_else(|| anyhow!("No y"))?.parse()?;
+                let r = args.next().ok_or_else(|| anyhow!("No r"))?.parse()?;
+                let g = args.next().ok_or_else(|| anyhow!("No g"))?.parse()?;
+                let b = args.next().ok_or_else(|| anyhow!("No b"))?.parse()?;
+                Ok(TX::Paint(XY { x, y }, Color { r, g, b }))
+            }
+            "nick" => {
+                // nick <name>
+                let name = args.next().ok_or_else(|| anyhow!("No name"))?;
+                Ok(TX::Nick(name.to_string()))
+            }
+            "help" => Err(anyhow!("Commands: \n\tpaint <x> <y> <r> <g> <b> \n\tnick <name>")),
+            _ => {
+                // unknown command
+                Err(anyhow!("Unknown command"))
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 enum RX {
     Pixel(Pixel),
     User(User),
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
 struct WebSocketHandler {
     handle: tokio::task::JoinHandle<()>,
     sender: tokio::sync::mpsc::UnboundedSender<TX>,
@@ -81,6 +100,7 @@ enum WebsocketState {
     Disconnected(String),
 }
 
+#[allow(dead_code)]
 impl WebSocketHandler {
     async fn new(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let (mut ws_stream, _) = tokio_tungstenite::connect_async_with_config(url, None).await?;
@@ -170,7 +190,7 @@ impl WebSocketHandler {
             Err(WebsocketError::from_state(l))
         }
     }
-    async fn wait_for_reconnect(&mut self) {
+    async fn connect(&mut self) {
         loop {
             let l = &*self.state.lock().await;
             if let WebsocketState::Connected = l {
@@ -179,28 +199,29 @@ impl WebSocketHandler {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    async fn try_send_with_reconnect(self, msg: TX) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut h = self;
-        if let Err(e) = h.try_send(msg.clone()).await {
+    async fn try_send_with_reconnect(&mut self, msg: TX) -> Result<(), Box<dyn std::error::Error>> {
+        // if we are not connected, return an error
+        {
+            let l = &*self.state.lock().await;
+            match l {
+                WebsocketState::Connected => {}
+                _ => return Err(Box::new(WebsocketError::from_state(l))),
+            }
+        }
+        if let Err(e) = self.try_send(msg.clone()).await {
             match e {
                 WebsocketError::NotConnected => {
                     // println!("Not yet initialized");
                 }
-                WebsocketError::Disconnected(e) => {
-                    // println!("Send error: {}", e);
-                    // println!("Reconnecting...");
-                    let mut newclient = WebSocketHandler::new("wss://place.planetfifty.one/ws/").await?;
-                    // println!("Sending command again...");
-                    // wait for reconnection
-                    newclient.wait_for_reconnect().await;
+                WebsocketError::Disconnected(_) => {
+                    let mut newclient = Self::new("wss://place.planetfifty.one/ws/").await?;
+                    newclient.connect().await;
                     newclient.try_send(msg).await.unwrap();
-                    h = newclient;
-                    // mem::swap(&mut client, &mut newclient);
-                    // drop(newclient);
+                    mem::swap(self, &mut newclient);
                 }
             }
         }
-        Ok(h)
+        Ok(())
     }
     async fn try_recieve(&mut self) -> Option<RX> {
         self.receiver.try_recv().ok()
@@ -231,5 +252,104 @@ impl std::fmt::Display for WebsocketError {
             Self::NotConnected => write!(f, "Not connected"),
             Self::Disconnected(e) => write!(f, "Disconnected: {}", e),
         }
+    }
+}
+
+#[derive(Debug)]
+struct PlaceClient {
+    client: WebSocketHandler,
+    place: Vec<Vec<Pixel>>,
+    users: LazyUserMap,
+    server_info: SafeInfo,
+    chunks_loaded: Vec<Vec<bool>>,
+}
+
+impl PlaceClient {
+    async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut client = WebSocketHandler::new("wss://place.planetfifty.one/ws/").await?;
+        let info = get_info().await?;
+        let chunks_loaded = vec![vec![false; info.size.x / info.chunk_size]; info.size.y / info.chunk_size];
+        client.connect().await;
+        Ok(Self {
+            client,
+            place: get_blank_data(info.size),
+            users: LazyUserMap::new(),
+            server_info: info,
+            chunks_loaded,
+        })
+    }
+    // async fn send(&mut self, msg: TX) -> Result<(), WebsocketError> {
+    //     self.client.try_send(msg).await
+    // }
+    async fn websocket_send(&mut self, msg: TX) -> Result<(), Box<dyn std::error::Error>> {
+        self.client.try_send_with_reconnect(msg).await?;
+        Ok(())
+    }
+    async fn recieve(&mut self) -> Option<RX> {
+        self.client.try_recieve().await
+    }
+    async fn update(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        while let Some(msg) = self.recieve().await {
+            match msg {
+                RX::Pixel(pixel) => {
+                    let location = pixel.location.clone();
+                    self.place[location.y][location.x] = pixel;
+                }
+                RX::User(user) => {
+                    self.users.put(user.id.clone(), user);
+                }
+            }
+        }
+        Ok(())
+    }
+    async fn get_user(&self, id: &str) -> Result<User, Error> {
+        // check if user is in cache, if not, request it from /api/user/{id}
+        self.users.get(id).await
+    }
+    async fn create_image(&self) -> JoinHandle<Result<DynamicImage, Error>> {
+        let place = self.place.clone();
+        // let users = self.users.clone();
+        let size = (self.server_info.size.x as u32, self.server_info.size.y as u32);
+        tokio::spawn(async move {
+            let mut img = DynamicImage::new_rgba8(size.0, size.1);
+            for row in place.iter() {
+                for pixel in row.iter() {
+                    // let user = users.get(&pixel.user).await?;
+                    let color = pixel.color.clone();
+                    img.put_pixel(pixel.location.x as u32, pixel.location.y as u32, Rgba([color.r, color.g, color.b, 255]));
+                }
+            }
+            Ok(img)
+        })
+    }
+}
+
+async fn get_info() -> Result<SafeInfo, Box<dyn std::error::Error>> {
+    let resp = reqwest::get("https://place.planetfifty.one/api/info").await?;
+    let info: SafeInfo = resp.json().await?;
+    Ok(info)
+}
+
+#[derive(Debug, Clone)]
+struct LazyUserMap {
+    map: HashMap<String, User>,
+}
+
+impl LazyUserMap {
+    fn new() -> Self {
+        Self { map: HashMap::new() }
+    }
+    async fn get(&self, id: &str) -> Result<User, Error> {
+        if let Some(user) = self.map.get(id) {
+            Ok(user.clone())
+        } else {
+            let url = format!("https://place.planetfifty.one/api/user/{}", id);
+            let resp = reqwest::get(&url).await?;
+            let user: User = resp.json().await?;
+            Ok(user)
+        }
+    }
+    fn put(&mut self, id: String, user: User) {
+        self.map.insert(id, user);
     }
 }

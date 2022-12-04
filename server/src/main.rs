@@ -1,7 +1,7 @@
 use actix::fut::wrap_future;
 use actix::prelude::*;
 use actix_web_actors::ws;
-use place_rs_shared::LazyUser;
+use place_rs_shared::SafeInfo;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
@@ -29,14 +29,9 @@ async fn api_info() -> impl Responder {
     let info = SafeInfo {
         timeout: config.timeout,
         size: config.size,
+        chunk_size: config.chunk_size,
     };
     web::Json(info)
-}
-
-#[derive(Serialize, Deserialize)]
-struct SafeInfo {
-    timeout: i64,
-    size: XY,
 }
 
 #[actix_web::main] // or #[tokio::main]
@@ -142,14 +137,14 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                 ctx.text(err);
                                 return;
                             }
-                            let user = self.user.clone().map(LazyUser::User);
+                            let user = self.user.clone();
                             if let Some(user) = user {
                                 let time = chrono::Utc::now().timestamp();
                                 let pixel = Pixel {
                                     location,
                                     color,
                                     timestamp: Some(time),
-                                    user,
+                                    user: Some(user.id),
                                 };
                                 let (tx, mut rx) = oneshot::channel::<String>();
                                 let f = wrap_future(update_pixel(pixel, self.place.clone(), tx));

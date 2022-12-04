@@ -83,16 +83,10 @@ impl Place {
         chunk
     }
     pub async fn set_pixel(&mut self, newpixel: Pixel) -> Result<(), Error> {
-        if newpixel.user == LazyUser::None {
-            return Err(anyhow!("User not found"));
-        }
         let now = chrono::Utc::now();
         let thisnow = now.timestamp();
-        let user = self.users.iter_mut().find(|user| match newpixel.user.clone() {
-            LazyUser::User(theuser) => theuser.id == user.id,
-            LazyUser::Id(id) => id == user.id,
-            LazyUser::None => unreachable!("User not found"),
-        });
+        let newuser = newpixel.user.as_ref().ok_or(anyhow!("No user"))?.clone();
+        let user = self.users.iter_mut().find(|user| user.id == newuser.clone());
         if let Some(user) = user.as_ref() {
             if user.timeout > thisnow {
                 return Err(anyhow::anyhow!("User is within timeout. Please wait {} seconds", user.timeout - thisnow));
@@ -119,11 +113,7 @@ impl Place {
         if let Some(user) = user {
             user.timeout = thisnow + self.config.timeout;
         } else {
-            let mut thisuser = match newpixel.user.clone() {
-                LazyUser::User(theuser) => theuser,
-                LazyUser::Id(id) => self.users.iter().find(|user| user.id == id).ok_or_else(|| anyhow::anyhow!("User not found"))?.clone(),
-                LazyUser::None => unreachable!("User not found"),
-            };
+            let mut thisuser = self.users.iter().find(|user| user.id == newuser).ok_or(anyhow::anyhow!("User not found"))?.clone();
             thisuser.timeout = thisnow + self.config.timeout;
             self.users.push(thisuser);
         }
@@ -142,22 +132,22 @@ impl Place {
         self.websockets.retain(|websocket| websocket.id != id);
     }
     pub async fn save_pixel(&self, pixel: Pixel) -> Result<(), Error> {
-        self.handler.save_pixel(pixel).await
+        let newuser = pixel.user.as_ref().ok_or(anyhow!("No user"))?.clone();
+        let user = self.users.iter().find(|user| user.id == newuser).ok_or(anyhow::anyhow!("User not found"))?.clone();
+        self.handler.save_pixel(pixel, user).await
     }
     pub async fn set_username(&mut self, id: String, username: String) -> Result<(), Error> {
         let user = self.users.iter_mut().find(|user| user.id == id);
         if let Some(user) = user {
             user.name = username;
             // iter over all pixels and change the username if it matches the id
-            for row in self.data.iter_mut() {
-                for pixel in row.iter_mut() {
-                    if let LazyUser::Id(id) = pixel.user.clone() {
-                        if id == user.id {
-                            pixel.user = LazyUser::User(user.clone());
-                        }
-                    }
-                }
-            }
+            // for row in self.data.iter_mut() {
+            //     for pixel in row.iter_mut() {
+            //         if pixel.user == id {
+            //              = username.clone();
+            //         }
+            //     }
+            // }
             for websocket in self.websockets.iter_mut() {
                 let r = websocket.handle.send(WebsocketMessage::User(user.clone()));
                 if r.is_err() {
@@ -172,7 +162,7 @@ impl Place {
     }
 }
 
-fn get_blank_data(size: XY) -> Vec<Vec<Pixel>> {
+pub fn get_blank_data(size: XY) -> Vec<Vec<Pixel>> {
     let mut data = Vec::new();
     for y in 0..size.y {
         let mut row = Vec::new();
@@ -228,7 +218,7 @@ impl Handler for JsonHandler {
         serde_json::to_writer_pretty(file, &data)?;
         Ok(())
     }
-    async fn save_pixel(&self, _pixel: Pixel) -> Result<(), Error> {
+    async fn save_pixel(&self, _pixel: Pixel, user: User) -> Result<(), Error> {
         Ok(())
     }
     fn clone(&self) -> Box<dyn Handler> {
@@ -245,12 +235,12 @@ fn get_pg_uri(data: PostgresConfig) -> String {
     format!("postgres://{}:{}@{}:{}/{}", data.username, data.password, data.host, data.port, data.database)
 }
 
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub enum LazyUser {
-    Id(String),
-    User(User),
-    None,
-}
+// #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+// pub enum LazyUser {
+//     Id(String),
+//     User(User),
+//     None,
+// }
 
 #[async_trait]
 impl Handler for PostgresHandler {
@@ -286,7 +276,7 @@ impl Handler for PostgresHandler {
                     let pixel = Pixel {
                         location: XY { x, y },
                         color: Color::from_str(row.get("color"))?,
-                        user: LazyUser::Id(id.clone()),
+                        user: Some(id.clone()),
                         timestamp,
                     };
                     let user = User {
@@ -307,15 +297,15 @@ impl Handler for PostgresHandler {
         users.dedup_by(|a, b| a.id == b.id);
         println!("Loaded {} users", users.len());
         // unlazify users
-        for row in data.iter_mut() {
-            for pixel in row.iter_mut() {
-                if let LazyUser::Id(id) = &pixel.user {
-                    if let Some(user) = users.iter().find(|user| user.id == *id) {
-                        pixel.user = LazyUser::User(user.clone());
-                    }
-                }
-            }
-        }
+        // for row in data.iter_mut() {
+        //     for pixel in row.iter_mut() {
+        //         if let LazyUser::Id(id) = &pixel.user {
+        //             if let Some(user) = users.iter().find(|user| user.id == *id) {
+        //                 pixel.user = LazyUser::User(user.clone());
+        //             }
+        //         }
+        //     }
+        // }
         Ok(Place {
             data,
             users,
@@ -325,11 +315,11 @@ impl Handler for PostgresHandler {
         })
     }
 
-    async fn save_pixel(&self, pixel: Pixel) -> Result<(), Error> {
-        let user = match &pixel.user {
-            LazyUser::User(user) => user,
-            _ => return Err(anyhow!("Invalid user")),
-        };
+    async fn save_pixel(&self, pixel: Pixel, user: User) -> Result<(), Error> {
+        // let user = match &pixel.user {
+        //     LazyUser::User(user) => user,
+        //     _ => return Err(anyhow!("Invalid user")),
+        // };
         sqlx::query("INSERT INTO data (x, y, color, user_id, user_name, user_timeout, timestamp, uuid) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (uuid) DO UPDATE SET color = $3, user_id = $4, user_name = $5, user_timeout = $6, timestamp = $7").bind(pixel.location.x as i64).bind(pixel.location.y as i64).bind(&(pixel.color.to_string())).bind(&user.id).bind(&user.name).bind(user.timeout).bind(pixel.timestamp).bind(format!("{}:{}", pixel.location.x, pixel.location.y)).execute(&self.pool).await?;
         Ok(())
     }
@@ -369,7 +359,7 @@ impl Default for JsonHandler {
 pub struct Pixel {
     pub color: Color,
 
-    pub user: LazyUser,
+    pub user: Option<String>,
     pub location: XY,
     pub timestamp: Option<i64>,
 }
@@ -381,10 +371,10 @@ pub struct XY {
 }
 
 impl Pixel {
-    fn new(x: usize, y: usize) -> Self {
+    pub fn new(x: usize, y: usize) -> Self {
         Self {
             color: Color::default(),
-            user: LazyUser::None,
+            user: None,
             location: XY { x, y },
             timestamp: None,
         }
@@ -457,7 +447,7 @@ pub enum HandlerType {
 pub trait Handler: Send {
     async fn save(&self, data: SaveData) -> Result<(), Error>;
     async fn load(&self) -> Result<Place, Error>;
-    async fn save_pixel(&self, pixel: Pixel) -> Result<(), Error>;
+    async fn save_pixel(&self, pixel: Pixel, user: User) -> Result<(), Error>;
     fn clone(&self) -> Box<dyn Handler>;
 }
 
@@ -486,6 +476,13 @@ impl FromStr for HandlerType {
             _ => Err(anyhow::anyhow!("Invalid handler")),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SafeInfo {
+    pub timeout: i64,
+    pub chunk_size: usize,
+    pub size: XY,
 }
 
 impl ServerConfig {
