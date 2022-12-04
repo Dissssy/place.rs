@@ -180,17 +180,17 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                         ctx.stop();
                                         return;
                                     }
-                                    // check if a heartbeat needs to be sent (every 5 seconds)
-                                    if act.heartbeat() {
-                                        ctx.text("BeatHeart");
-                                        if act.heartbeats > 5 {
-                                            ctx.stop();
-                                        }
-                                    }
                                     // check if there is a message in the channel
                                     if let Ok(msg) = rx.try_recv() {
                                         // if there is, send it to the websocket
                                         ctx.text(serde_json::to_string(&msg).unwrap());
+                                    }
+                                    if act.heartbeat() {
+                                        if act.heartbeats > 5 {
+                                            ctx.stop();
+                                        } else {
+                                            ctx.text("BeatHeart");
+                                        }
                                     }
                                 });
                                 ctx.text("Listening");
