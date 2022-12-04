@@ -123,10 +123,6 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
         match msg {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => {
-                if self.rx.is_some() {
-                    ctx.text("Initialise the listener first");
-                    return;
-                }
                 // let th = RawWebsocketMessage::PixelUpdate {
                 //     x: 0,
                 //     y: 0,
@@ -138,6 +134,10 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                 if let Ok(msg) = msg {
                     match msg {
                         RawWebsocketMessage::PixelUpdate { x, y, color } => {
+                            if self.rx.is_some() {
+                                ctx.text("Initialise the listener first");
+                                return;
+                            }
                             let user = self.user.clone().map(LazyUser::User);
                             if let Some(user) = user {
                                 let time = chrono::Utc::now().timestamp();
@@ -160,6 +160,10 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                             }
                         }
                         RawWebsocketMessage::Heartbeat => {
+                            if self.rx.is_some() {
+                                ctx.text("Initialise the listener first");
+                                return;
+                            }
                             // send the heartbeat to the websocket
                             self.heartbeats = 0;
                         }
@@ -216,6 +220,10 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                             }
                         }
                         RawWebsocketMessage::SetUsername(username) => {
+                            if self.rx.is_some() {
+                                ctx.text("Initialise the listener first");
+                                return;
+                            }
                             if let Some(mut user) = self.user.clone() {
                                 let (tx, mut rx) = oneshot::channel::<String>();
                                 user.name = username;
