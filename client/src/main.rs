@@ -48,6 +48,12 @@ async fn main() {
 enum TX {
     Paint(XY, Color),
     Nick(String),
+    Meta(Meta),
+}
+#[derive(Debug, Clone)]
+enum Meta {
+    Info,
+    Export(String),
 }
 
 impl TX {
@@ -68,6 +74,11 @@ impl TX {
                 // nick <name>
                 let name = args.next().ok_or_else(|| anyhow!("No name"))?;
                 Ok(TX::Nick(name.to_string()))
+            }
+            "export" => {
+                // export <filename>
+                let filename = args.next().ok_or_else(|| anyhow!("No filename"))?;
+                Ok(TX::Meta(Meta::Export(filename.to_string())))
             }
             "help" => Err(anyhow!("Commands: \n\tpaint <x> <y> <r> <g> <b> \n\tnick <name>")),
             _ => {
@@ -102,7 +113,7 @@ enum WebsocketState {
 
 #[allow(dead_code)]
 impl WebSocketHandler {
-    async fn new(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new(url: &str) -> Result<Self, Error> {
         let (mut ws_stream, _) = tokio_tungstenite::connect_async_with_config(url, None).await?;
 
         let listencommand = RawWebsocketMessage::Listen;
@@ -133,6 +144,7 @@ impl WebSocketHandler {
                                     *state.lock().await = WebsocketState::Disconnected(e.to_string());
                                 }
                             }
+                            _ => {}
                         }
                     }
                     Some(msg) = ws_stream.next() => {
@@ -141,11 +153,11 @@ impl WebSocketHandler {
                             let msg = serde_json::from_str::<WebsocketMessage>(&msg.to_string()).unwrap();
                             match msg {
                                 WebsocketMessage::Pixel(pixel) => {
-                                    println!("Pixel: {:?}", pixel);
+                                    // println!("Pixel: {:?}", pixel);
                                     rtx.send(RX::Pixel(pixel)).unwrap();
                                 }
                                 WebsocketMessage::User(user) => {
-                                    println!("User: {:?}", user);
+                                    // println!("User: {:?}", user);
                                     rtx.send(RX::User(user)).unwrap();
                                 }
                                 WebsocketMessage::Heartbeat => {
@@ -199,13 +211,13 @@ impl WebSocketHandler {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    async fn try_send_with_reconnect(&mut self, msg: TX) -> Result<(), Box<dyn std::error::Error>> {
+    async fn try_send_with_reconnect(&mut self, msg: TX) -> Result<(), WebsocketError> {
         // if we are not connected, return an error
         {
             let l = &*self.state.lock().await;
             match l {
                 WebsocketState::Connected => {}
-                _ => return Err(Box::new(WebsocketError::from_state(l))),
+                _ => return Err(WebsocketError::from_state(l)),
             }
         }
         if let Err(e) = self.try_send(msg.clone()).await {
@@ -214,7 +226,9 @@ impl WebSocketHandler {
                     // println!("Not yet initialized");
                 }
                 WebsocketError::Disconnected(_) => {
-                    let mut newclient = Self::new("wss://place.planetfifty.one/ws/").await?;
+                    let mut newclient = Self::new("wss://place.planetfifty.one/ws/")
+                        .await
+                        .map_err(|_| WebsocketError::Disconnected("Could not reconnect".to_string()))?;
                     newclient.connect().await;
                     newclient.try_send(msg).await.unwrap();
                     mem::swap(self, &mut newclient);
@@ -262,42 +276,107 @@ struct PlaceClient {
     users: LazyUserMap,
     server_info: SafeInfo,
     chunks_loaded: Vec<Vec<bool>>,
+    image_task: Option<(String, JoinHandle<Result<DynamicImage, Error>>)>,
+    update_task: Option<JoinHandle<()>>,
 }
 
 impl PlaceClient {
-    async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new() -> Result<Self, Error> {
         let mut client = WebSocketHandler::new("wss://place.planetfifty.one/ws/").await?;
         let info = get_info().await?;
         let chunks_loaded = vec![vec![false; info.size.x / info.chunk_size]; info.size.y / info.chunk_size];
         client.connect().await;
-        Ok(Self {
+        let mut client = Self {
             client,
             place: get_blank_data(info.size),
             users: LazyUserMap::new(),
             server_info: info,
             chunks_loaded,
-        })
+            image_task: None,
+            update_task: None,
+        };
+        client.get_pixel_data().await?;
+        Ok(client)
+    }
+    async fn get_pixel_data(&mut self) -> Result<(), Error> {
+        // we will be filling out the place vector with the pixel data
+        // from the /api/canvas/{chunk_y}/{chunk_x} endpoint
+        // we will also be filling out the chunks_loaded vector with the
+        // chunks that we have loaded
+        // and we will be filling out the users vector with the user data
+        // using the /api/users/{id} endpoint
+        // the user id will come from the pixel data
+        for (y, r) in self.chunks_loaded.iter_mut().enumerate() {
+            for (x, b) in r.iter_mut().enumerate() {
+                println!("Loading chunk: {}, {}", x, y);
+                // get the chunk data from the api
+                let chunk = get_chunk(y, x).await?;
+                // println!("{:?}", chunk);
+                // fill out the place vector with the chunk data
+                let mut users = Vec::new();
+                for pixel in chunk {
+                    let location = pixel.location;
+                    self.place[location.y][location.x] = pixel.clone();
+                    if let Some(user) = pixel.user {
+                        users.push(user);
+                    }
+                }
+                // fill out the users vector with the user data
+                for user in users {
+                    self.users.get(&user).await?;
+                }
+                // set the chunk to loaded
+                *b = true;
+            }
+        }
+        Ok(())
     }
     // async fn send(&mut self, msg: TX) -> Result<(), WebsocketError> {
     //     self.client.try_send(msg).await
     // }
-    async fn websocket_send(&mut self, msg: TX) -> Result<(), Box<dyn std::error::Error>> {
-        self.client.try_send_with_reconnect(msg).await?;
-        Ok(())
+    async fn websocket_send(&mut self, msg: TX) -> Result<(), Error> {
+        self.update().await?;
+        if let TX::Meta(command) = msg {
+            match command {
+                Meta::Info => {
+                    println!("{:?}", self);
+                    Ok(())
+                }
+                Meta::Export(filename) => {
+                    if self.image_task.is_some() {
+                        Err(anyhow!("Already exporting"))
+                    } else {
+                        self.image_task = Some((filename, self.create_image().await));
+                        Ok(())
+                    }
+                }
+            }
+        } else {
+            self.client.try_send_with_reconnect(msg).await?;
+            Ok(())
+        }
     }
     async fn recieve(&mut self) -> Option<RX> {
         self.client.try_recieve().await
     }
-    async fn update(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn update(&mut self) -> Result<(), Error> {
         while let Some(msg) = self.recieve().await {
             match msg {
                 RX::Pixel(pixel) => {
-                    let location = pixel.location.clone();
+                    let location = pixel.location;
                     self.place[location.y][location.x] = pixel;
+                    println!("Pixel updated at {:?}", location);
                 }
                 RX::User(user) => {
-                    self.users.put(user.id.clone(), user);
+                    self.users.put(user.id.clone(), user.clone());
+                    println!("User updated: {:?}", user);
                 }
+            }
+        }
+        if let Some((filename, task)) = &mut self.image_task {
+            if let Ok(Ok(image)) = task.await {
+                image.save(filename)?;
+                self.image_task = None;
             }
         }
         Ok(())
@@ -324,7 +403,7 @@ impl PlaceClient {
     }
 }
 
-async fn get_info() -> Result<SafeInfo, Box<dyn std::error::Error>> {
+async fn get_info() -> Result<SafeInfo, Error> {
     let resp = reqwest::get("https://place.planetfifty.one/api/info").await?;
     let info: SafeInfo = resp.json().await?;
     Ok(info)
@@ -344,12 +423,22 @@ impl LazyUserMap {
             Ok(user.clone())
         } else {
             let url = format!("https://place.planetfifty.one/api/user/{}", id);
+            println!("Requesting user data from {}", url);
             let resp = reqwest::get(&url).await?;
-            let user: User = resp.json().await?;
-            Ok(user)
+            println!("{}", resp.text().await?);
+            // let user: User = resp.json().await?;
+            // Ok(user)
+            Err(anyhow!("User not found"))
         }
     }
     fn put(&mut self, id: String, user: User) {
         self.map.insert(id, user);
     }
+}
+
+async fn get_chunk(y: usize, x: usize) -> Result<Vec<Pixel>, Error> {
+    let url = format!("https://place.planetfifty.one/api/canvas/{}/{}", y, x);
+    let resp = reqwest::get(&url).await.unwrap();
+    let chunk = resp.json().await.unwrap();
+    Ok(chunk)
 }

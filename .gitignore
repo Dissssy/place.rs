@@ -5,3 +5,4 @@ server/Cargo.lock
 shared/target
 shared/Cargo.lock
 shared/comments.rs
+client/img.png
