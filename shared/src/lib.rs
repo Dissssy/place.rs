@@ -78,9 +78,16 @@ impl Place {
         chunk
     }
     pub async fn set_pixel(&mut self, newpixel: Pixel) -> Result<(), Error> {
+        if newpixel.user == LazyUser::None {
+            return Err(anyhow!("User not found"));
+        }
         let now = chrono::Utc::now();
         let thisnow = now.timestamp();
-        let user = self.users.iter_mut().find(|user| if let Some(theuser) = newpixel.user.clone() { theuser.id == user.id } else { false });
+        let user = self.users.iter_mut().find(|user| match newpixel.user.clone() {
+            LazyUser::User(theuser) => theuser.id == user.id,
+            LazyUser::Id(id) => id == user.id,
+            LazyUser::None => unreachable!("User not found"),
+        });
         if let Some(user) = user.as_ref() {
             if user.timeout > thisnow {
                 return Err(anyhow::anyhow!("User is within timeout. Please wait {} seconds", user.timeout - thisnow));
@@ -107,21 +114,45 @@ impl Place {
         if let Some(user) = user {
             user.timeout = thisnow + self.config.timeout;
         } else {
-            let mut thisuser = newpixel.user.as_ref().unwrap().clone();
+            let mut thisuser = match newpixel.user.clone() {
+                LazyUser::User(theuser) => theuser,
+                LazyUser::Id(id) => self.users.iter().find(|user| user.id == id).ok_or_else(|| anyhow::anyhow!("User not found"))?.clone(),
+                LazyUser::None => unreachable!("User not found"),
+            };
             thisuser.timeout = thisnow + self.config.timeout;
             self.users.push(thisuser);
         }
         self.save_pixel(newpixel).await?;
         Ok(())
     }
-    pub fn add_websocket(&mut self, id: String, handle: UnboundedSender<WebsocketMessage>) {
-        self.websockets.push(WebsocketHandler { id, handle });
+    pub fn add_websocket(&mut self, id: String, handle: UnboundedSender<WebsocketMessage>) -> Option<User> {
+        self.websockets.push(WebsocketHandler { id: id.clone(), handle });
+        self.users.iter().find(|user| user.id == id).cloned()
     }
     pub fn remove_websocket(&mut self, id: String) {
         self.websockets.retain(|websocket| websocket.id != id);
     }
     pub async fn save_pixel(&self, pixel: Pixel) -> Result<(), Error> {
         self.handler.save_pixel(pixel).await
+    }
+    pub async fn set_username(&mut self, id: String, username: String) -> Result<(), Error> {
+        let user = self.users.iter_mut().find(|user| user.id == id);
+        if let Some(user) = user {
+            user.name = username;
+            // iter over all pixels and change the username if it matches the id
+            for row in self.data.iter_mut() {
+                for pixel in row.iter_mut() {
+                    if let LazyUser::Id(id) = pixel.user.clone() {
+                        if id == user.id {
+                            pixel.user = LazyUser::User(user.clone());
+                        }
+                    }
+                }
+            }
+            Ok(())
+        } else {
+            Err(anyhow!("User not found"))
+        }
     }
 }
 
@@ -198,6 +229,13 @@ fn get_pg_uri(data: PostgresConfig) -> String {
     format!("postgres://{}:{}@{}:{}/{}", data.username, data.password, data.host, data.port, data.database)
 }
 
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub enum LazyUser {
+    Id(String),
+    User(User),
+    None,
+}
+
 #[async_trait]
 impl Handler for PostgresHandler {
     async fn save(&self, _data: SaveData) -> Result<(), Error> {
@@ -219,26 +257,28 @@ impl Handler for PostgresHandler {
             let x = x as usize;
             let y: i32 = row.get("y");
             let y = y as usize;
-            let timeout: i32 = row.get("user_timeout");
-            let timeout = timeout as i64;
-            let timestamp: i32 = row.get("timestamp");
-            let timestamp = Some(timestamp as i64);
-            let pixel = Pixel {
-                location: XY { x, y },
-                color: Color::from_str(row.get("color"))?,
-                user: Some(User {
-                    id: row.get("user_id"),
-                    timeout,
-                    name: row.get("user_name"),
-                }),
-                timestamp,
-            };
+            // let timeout: i32 = row.get("user_timeout");
+            // let timeout = timeout as i64;
+            let rtimestamp: i32 = row.get("timestamp");
+            let timestamp = Some(rtimestamp as i64);
 
-            let row = data.get_mut(x);
-            if let Some(row) = row {
-                let tpixel = row.get_mut(y);
+            let trow = data.get_mut(x);
+            if let Some(trow) = trow {
+                let tpixel = trow.get_mut(y);
                 if let Some(tpixel) = tpixel {
-                    users.push(pixel.user.as_ref().unwrap().clone());
+                    let id: String = row.get("user_id");
+                    let pixel = Pixel {
+                        location: XY { x, y },
+                        color: Color::from_str(row.get("color"))?,
+                        user: LazyUser::Id(id.clone()),
+                        timestamp,
+                    };
+                    let user = User {
+                        id,
+                        timeout: rtimestamp as i64,
+                        name: row.get("user_name"),
+                    };
+                    users.push(user);
                     *tpixel = pixel.clone();
                     count += 1;
                 }
@@ -249,7 +289,16 @@ impl Handler for PostgresHandler {
         users.sort_by(|a, b| b.timeout.cmp(&a.timeout));
         users.dedup_by(|a, b| a.id == b.id);
         println!("Loaded {} users", users.len());
-
+        // unlazify users
+        for row in data.iter_mut() {
+            for pixel in row.iter_mut() {
+                if let LazyUser::Id(id) = &pixel.user {
+                    if let Some(user) = users.iter().find(|user| user.id == *id) {
+                        pixel.user = LazyUser::User(user.clone());
+                    }
+                }
+            }
+        }
         Ok(Place {
             data,
             users,
@@ -260,7 +309,11 @@ impl Handler for PostgresHandler {
     }
 
     async fn save_pixel(&self, pixel: Pixel) -> Result<(), Error> {
-        sqlx::query("INSERT INTO data (x, y, color, user_id, user_name, user_timeout, timestamp, uuid) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (uuid) DO UPDATE SET color = $3, user_id = $4, user_name = $5, user_timeout = $6, timestamp = $7").bind(pixel.location.x as i64).bind(pixel.location.y as i64).bind(&(pixel.color.to_string())).bind(&pixel.user.as_ref().unwrap().id).bind(&pixel.user.as_ref().unwrap().name).bind(pixel.user.as_ref().unwrap().timeout).bind(pixel.timestamp).bind(format!("{}:{}", pixel.location.x, pixel.location.y)).execute(&self.pool).await?;
+        let user = match &pixel.user {
+            LazyUser::User(user) => user,
+            _ => return Err(anyhow!("Invalid user")),
+        };
+        sqlx::query("INSERT INTO data (x, y, color, user_id, user_name, user_timeout, timestamp, uuid) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (uuid) DO UPDATE SET color = $3, user_id = $4, user_name = $5, user_timeout = $6, timestamp = $7").bind(pixel.location.x as i64).bind(pixel.location.y as i64).bind(&(pixel.color.to_string())).bind(&user.id).bind(&user.name).bind(user.timeout).bind(pixel.timestamp).bind(format!("{}:{}", pixel.location.x, pixel.location.y)).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -299,7 +352,7 @@ impl Default for JsonHandler {
 pub struct Pixel {
     pub color: Color,
 
-    pub user: Option<User>,
+    pub user: LazyUser,
     pub location: XY,
     pub timestamp: Option<i64>,
 }
@@ -314,14 +367,14 @@ impl Pixel {
     fn new(x: usize, y: usize) -> Self {
         Self {
             color: Color::default(),
-            user: None,
+            user: LazyUser::None,
             location: XY { x, y },
             timestamp: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct User {
     pub name: String,
     pub id: String,

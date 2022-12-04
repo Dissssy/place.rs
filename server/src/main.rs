@@ -1,6 +1,7 @@
 use actix::fut::wrap_future;
 use actix::prelude::*;
 use actix_web_actors::ws;
+use place_rs_shared::LazyUser;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
@@ -73,6 +74,7 @@ struct MyWs {
     place: Arc<Mutex<Place>>,
     rx: Option<UnboundedReceiver<WebsocketMessage>>,
     id: String,
+    user: Option<User>,
 }
 
 impl Actor for MyWs {
@@ -87,12 +89,9 @@ use place_rs_shared::WebsocketMessage;
 async fn ws_index(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<Place>>>) -> Result<HttpResponse, actix_web::Error> {
     let place = data.get_ref().clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    place.lock().await.add_websocket(hash(req.peer_addr().unwrap().ip().to_string()), tx);
-    let myws = MyWs {
-        place,
-        rx: Some(rx),
-        id: hash(req.peer_addr().unwrap().ip().to_string()),
-    };
+    let id = hash(req.peer_addr().unwrap().ip().to_string());
+    let user = place.lock().await.add_websocket(id.clone(), tx);
+    let myws = MyWs { place, rx: Some(rx), user, id };
     ws::start(myws, &req, stream)
 }
 
@@ -114,25 +113,26 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                 if let Ok(msg) = msg {
                     match msg {
                         RawWebsocketMessage::PixelUpdate { x, y, color } => {
-                            let time = chrono::Utc::now().timestamp();
-                            let pixel = Pixel {
-                                location: XY { x, y },
-                                color,
-                                timestamp: Some(time),
-                                user: Some(User {
-                                    id: hash(self.id.clone()),
-                                    name: "test".to_string(),
-                                    timeout: time,
-                                }),
-                            };
-                            let (tx, mut rx) = oneshot::channel::<String>();
-                            let f = wrap_future(update_pixel(pixel, self.place.clone(), tx));
-                            ctx.spawn(f);
-                            ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
-                                if let Ok(msg) = rx.try_recv() {
-                                    ctx.text(msg);
-                                }
-                            });
+                            let user = self.user.clone().map(LazyUser::User);
+                            if let Some(user) = user {
+                                let time = chrono::Utc::now().timestamp();
+                                let pixel = Pixel {
+                                    location: XY { x, y },
+                                    color,
+                                    timestamp: Some(time),
+                                    user,
+                                };
+                                let (tx, mut rx) = oneshot::channel::<String>();
+                                let f = wrap_future(update_pixel(pixel, self.place.clone(), tx));
+                                ctx.spawn(f);
+                                ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
+                                    if let Ok(msg) = rx.try_recv() {
+                                        ctx.text(msg);
+                                    }
+                                });
+                            } else {
+                                ctx.text("You have not set a username yet");
+                            }
                         }
                         RawWebsocketMessage::Heartbeat => {
                             // send the heartbeat to the websocket
@@ -183,6 +183,25 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                 );
                             }
                         }
+                        RawWebsocketMessage::SetUsername(username) => {
+                            if let Some(mut user) = self.user.clone() {
+                                let (tx, mut rx) = oneshot::channel::<String>();
+                                user.name = username;
+                                let f = wrap_future(set_username(user, self.place.clone(), tx));
+                                ctx.spawn(f);
+                                ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
+                                    if let Ok(msg) = rx.try_recv() {
+                                        ctx.text(msg);
+                                    }
+                                });
+                            } else {
+                                self.user = Some(User {
+                                    name: username,
+                                    id: self.id.clone(),
+                                    timeout: 0,
+                                });
+                            }
+                        }
                         _ => {
                             ctx.text(
                                 serde_json::to_string(&RawWebsocketMessage::Error {
@@ -219,6 +238,7 @@ enum RawWebsocketMessage {
     Heartbeat,
     Error { message: String },
     Listen,
+    SetUsername(String),
 }
 
 #[derive(Deserialize, Debug, Serialize)]
@@ -236,6 +256,14 @@ fn hash(s: String) -> String {
 async fn update_pixel(pixel: Pixel, place: Arc<Mutex<Place>>, tx: oneshot::Sender<String>) {
     let mut place = place.lock().await;
     let r = place.set_pixel(pixel).await;
+    if let Err(r) = r {
+        tx.send(r.to_string()).unwrap();
+    }
+}
+
+async fn set_username(user: User, place: Arc<Mutex<Place>>, tx: oneshot::Sender<String>) {
+    let mut place = place.lock().await;
+    let r = place.set_username(user.id, user.name).await;
     if let Err(r) = r {
         tx.send(r.to_string()).unwrap();
     }
