@@ -70,6 +70,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(place_clone.clone()))
             .app_data(stop_handle)
             .service(api_canvas)
+            .service(api_user)
             .service(api_info)
             .service(stop)
             .route("/ws/", web::get().to(ws_index))
