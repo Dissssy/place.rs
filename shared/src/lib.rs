@@ -90,6 +90,7 @@ impl Place {
         let thisnow = now.timestamp();
         let newuser = newpixel.user.as_ref().ok_or(anyhow!("No user"))?.clone();
         let user = self.users.iter_mut().find(|user| user.id == newuser.clone());
+        println!("{}: {} set pixel at {},{}", thisnow, newuser, newpixel.location.x, newpixel.location.y);
         if let Some(user) = user.as_ref() {
             if user.timeout > thisnow {
                 return Err(anyhow::anyhow!("User is within timeout. Please wait {} seconds", user.timeout - thisnow));
