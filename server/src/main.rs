@@ -281,27 +281,8 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                     ctx.text(err);
                                     return;
                                 }
-                                let (tx, mut rx) = oneshot::channel::<String>();
                                 user.name = username;
                                 user.username_timeout = now + self.timeout;
-                                let f = wrap_future(set_username(user.clone(), self.place.clone(), tx));
-                                ctx.spawn(f);
-                                ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
-                                    // if let Ok(msg) = rx.try_recv() {
-                                    //     ctx.text(msg);
-                                    // }
-                                    println!("waiting for username");
-                                    match rx.try_recv() {
-                                        Ok(msg) => {
-                                            let msg = serde_json::to_string(&WebsocketMessage::Error(msg)).unwrap();
-                                            ctx.text(msg);
-                                        }
-                                        Err(TryRecvError::Empty) => {}
-                                        Err(TryRecvError::Closed) => {
-                                            ctx.stop();
-                                        }
-                                    }
-                                });
                             } else {
                                 self.user = Some(User {
                                     name: username,
@@ -309,7 +290,26 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                     username_timeout: now + self.timeout,
                                     timeout: 0,
                                 });
-                            }
+                            };
+                            let (tx, mut rx) = oneshot::channel::<String>();
+                            let f = wrap_future(set_username(self.user.clone().unwrap(), self.place.clone(), tx));
+                            ctx.spawn(f);
+                            ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
+                                // if let Ok(msg) = rx.try_recv() {
+                                //     ctx.text(msg);
+                                // }
+                                println!("waiting for username");
+                                match rx.try_recv() {
+                                    Ok(msg) => {
+                                        let msg = serde_json::to_string(&WebsocketMessage::Error(msg)).unwrap();
+                                        ctx.text(msg);
+                                    }
+                                    Err(TryRecvError::Empty) => {}
+                                    Err(TryRecvError::Closed) => {
+                                        ctx.stop();
+                                    }
+                                }
+                            });
                             // println!("{:?}", self.user);
                         }
                         _ => {
@@ -359,6 +359,7 @@ async fn update_pixel(pixel: Pixel, place: Arc<Mutex<Place>>, tx: oneshot::Sende
 
 async fn set_username(user: User, place: Arc<Mutex<Place>>, tx: oneshot::Sender<String>) {
     let mut place = place.lock().await;
+    println!("setting username");
     let r = place.set_username(user.id, user.name).await;
     if let Err(r) = r {
         tx.send(r.to_string()).unwrap();

@@ -161,6 +161,7 @@ impl Place {
             self.websockets.retain(|websocket| !websocket.closed);
             Ok(())
         } else {
+            println!("User not found");
             self.users.push(User {
                 id,
                 name: username,
