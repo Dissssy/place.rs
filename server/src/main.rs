@@ -299,17 +299,18 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                             //         ctx.text(msg);
                             //     }
                             // println!("waiting for username");
-                            match rx.blocking_recv() {
-                                Ok(msg) => {
-                                    let msg = serde_json::to_string(&WebsocketMessage::Error(msg)).unwrap();
-                                    ctx.text(msg);
+                            loop {
+                                match rx.try_recv() {
+                                    Ok(msg) => {
+                                        let msg = serde_json::to_string(&WebsocketMessage::Error(msg)).unwrap();
+                                        ctx.text(msg);
+                                    }
+                                    Err(TryRecvError::Empty) => {}
+                                    Err(TryRecvError::Closed) => {
+                                        break;
+                                    }
                                 }
-                                Err(_) => {} // Err(TryRecvError::Empty) => {}
-                                             // Err(TryRecvError::Closed) => {
-                                             //     break;
-                                             // }
                             }
-
                             // });
                             // println!("{:?}", self.user);
                         }
