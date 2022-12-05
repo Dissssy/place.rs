@@ -1,9 +1,16 @@
+use async_std::io::prelude::*;
+use async_std::io::stdin;
+use async_std::io::BufReader;
 use std::fmt::Formatter;
-use std::io;
 
 // hashmap
 use std::collections::HashMap;
-
+const URL: &str = "place.planetfifty.one";
+const WS: &str = "wss";
+const HTTP: &str = "https";
+// const URL: &str = "192.168.1.200:11069";
+// const WS: &str = "ws";
+// const HTTP: &str = "http";
 use anyhow::{anyhow, Error};
 
 use futures_util::SinkExt;
@@ -28,18 +35,25 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 async fn main() {
     // let mut client = WebSocketHandler::new("wss://place.planetfifty.one/ws/").await.unwrap();
     let mut client = PlaceClient::new().await.unwrap();
+    let mut stdin = BufReader::new(stdin());
+    let mut lines = stdin.lines();
     loop {
         // read stdin for Command: <command> <args> <args> ...
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
-        let args = input.split_whitespace().map(|x| x.to_string()).collect();
-        let wscommand = TX::parse(args);
-        match wscommand {
-            Ok(command) => {
-                client.websocket_send(command).await.unwrap();
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                client.update().await.unwrap();
             }
-            Err(e) => {
-                println!("Error: {}", e);
+            Some(Ok(x)) = lines.next() => {
+                let args = x.split_whitespace().map(|x| x.to_string()).collect();
+                let wscommand = TX::parse(args);
+                match wscommand {
+                    Ok(command) => {
+                        client.websocket_send(command).await.unwrap();
+                    }
+                    Err(e) => {
+                        println!("Error: {}", e);
+                    }
+                }
             }
         }
     }
@@ -228,7 +242,7 @@ impl WebSocketHandler {
                     // println!("Not yet initialized");
                 }
                 WebsocketError::Disconnected(_) => {
-                    let mut newclient = Self::new("wss://place.planetfifty.one/ws/")
+                    let mut newclient = Self::new(format!("{WS}://{URL}/ws/").as_str())
                         .await
                         .map_err(|_| WebsocketError::Disconnected("Could not reconnect".to_string()))?;
                     newclient.connect().await;
@@ -295,7 +309,7 @@ impl std::fmt::Debug for PlaceClient {
 
 impl PlaceClient {
     async fn new() -> Result<Self, Error> {
-        let mut client = WebSocketHandler::new("wss://place.planetfifty.one/ws/").await?;
+        let mut client = WebSocketHandler::new(format!("{WS}://{URL}/ws/").as_str()).await?;
         let info = get_info().await?;
         let chunks_loaded = vec![vec![false; info.size.x / info.chunk_size]; info.size.y / info.chunk_size];
         client.connect().await;
@@ -308,6 +322,7 @@ impl PlaceClient {
             image_task: None,
         };
         client.get_pixel_data().await?;
+        println!("Done");
         Ok(client)
     }
     async fn get_pixel_data(&mut self) -> Result<(), Error> {
@@ -419,7 +434,7 @@ impl PlaceClient {
 }
 
 async fn get_info() -> Result<SafeInfo, Error> {
-    let resp = reqwest::get("https://place.planetfifty.one/api/info").await?;
+    let resp = reqwest::get(format!("{HTTP}://{URL}/api/info").as_str()).await?;
     let info: SafeInfo = resp.json().await?;
     Ok(info)
 }
@@ -437,7 +452,7 @@ impl LazyUserMap {
         if let Some(user) = self.map.get(id) {
             Ok(user.clone())
         } else {
-            let url = format!("https://place.planetfifty.one/api/user/{}", id);
+            let url = format!("{HTTP}://{URL}/api/user/{}", id);
             println!("Requesting user data from {}", url);
             let resp = reqwest::get(&url).await?;
             // println!("{}", resp.text().await?);
@@ -452,7 +467,7 @@ impl LazyUserMap {
 }
 
 async fn get_chunk(y: usize, x: usize) -> Result<Vec<Pixel>, Error> {
-    let url = format!("https://place.planetfifty.one/api/canvas/{}/{}", y, x);
+    let url = format!("{HTTP}://{URL}/api/canvas/{}/{}", y, x);
     let resp = reqwest::get(&url).await.unwrap();
     let chunk = resp.json().await.unwrap();
     Ok(chunk)
