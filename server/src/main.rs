@@ -294,22 +294,23 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                             let (tx, mut rx) = oneshot::channel::<String>();
                             let f = wrap_future(set_username(self.user.clone().unwrap(), self.place.clone(), tx));
                             ctx.spawn(f);
-                            ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
-                                // if let Ok(msg) = rx.try_recv() {
-                                //     ctx.text(msg);
-                                // }
-                                println!("waiting for username");
-                                match rx.try_recv() {
-                                    Ok(msg) => {
-                                        let msg = serde_json::to_string(&WebsocketMessage::Error(msg)).unwrap();
-                                        ctx.text(msg);
-                                    }
-                                    Err(TryRecvError::Empty) => {}
-                                    Err(TryRecvError::Closed) => {
-                                        ctx.stop();
-                                    }
+                            // ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
+                            //     if let Ok(msg) = rx.try_recv() {
+                            //         ctx.text(msg);
+                            //     }
+                            // println!("waiting for username");
+                            match rx.blocking_recv() {
+                                Ok(msg) => {
+                                    let msg = serde_json::to_string(&WebsocketMessage::Error(msg)).unwrap();
+                                    ctx.text(msg);
                                 }
-                            });
+                                Err(_) => {} // Err(TryRecvError::Empty) => {}
+                                             // Err(TryRecvError::Closed) => {
+                                             //     break;
+                                             // }
+                            }
+
+                            // });
                             // println!("{:?}", self.user);
                         }
                         _ => {
