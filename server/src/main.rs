@@ -187,6 +187,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                 return;
                             }
                             let user = self.user.clone();
+                            println!("user: {:?}", user);
                             if let Some(user) = user {
                                 let time = chrono::Utc::now().timestamp();
                                 let pixel = Pixel {

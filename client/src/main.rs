@@ -156,6 +156,7 @@ impl WebSocketHandler {
                             TX::Nick(name) => {
                                 let user = RawWebsocketMessage::SetUsername(name);
                                 let msg = serde_json::to_string(&user).unwrap();
+                                println!("Sending: {}", msg);
                                 if let Err(e) = ws_stream.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await {
                                     *state.lock().await = WebsocketState::Disconnected(e.to_string());
                                 }
