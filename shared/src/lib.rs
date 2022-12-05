@@ -161,7 +161,13 @@ impl Place {
             self.websockets.retain(|websocket| !websocket.closed);
             Ok(())
         } else {
-            Err(anyhow!("User not found"))
+            self.users.push(User {
+                id,
+                name: username,
+                timeout: 0,
+                username_timeout: chrono::Utc::now().timestamp() + self.config.username_timeout,
+            });
+            Ok(())
         }
     }
 }
