@@ -290,6 +290,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                     // if let Ok(msg) = rx.try_recv() {
                                     //     ctx.text(msg);
                                     // }
+                                    println!("waiting for username");
                                     match rx.try_recv() {
                                         Ok(msg) => {
                                             ctx.text(msg);
