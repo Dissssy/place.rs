@@ -165,7 +165,7 @@ impl WebSocketHandler {
                     }
                     Some(msg) = ws_stream.next() => {
                         if let Ok(msg) = msg {
-                            // println!("got message from server: {:?}", msg);
+                            println!("got message from server: {:?}", msg);
                             let msg = serde_json::from_str::<WebsocketMessage>(&msg.to_string()).unwrap();
                             match msg {
                                 WebsocketMessage::Pixel(pixel) => {

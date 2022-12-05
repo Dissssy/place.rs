@@ -7,6 +7,7 @@ use place_rs_shared::SafeInfo;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
+use tokio::sync::oneshot::error::TryRecvError;
 // use sqlx::postgres::PgPoolOptions;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -286,8 +287,17 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                 let f = wrap_future(set_username(user.clone(), self.place.clone(), tx));
                                 ctx.spawn(f);
                                 ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
-                                    if let Ok(msg) = rx.try_recv() {
-                                        ctx.text(msg);
+                                    // if let Ok(msg) = rx.try_recv() {
+                                    //     ctx.text(msg);
+                                    // }
+                                    match rx.try_recv() {
+                                        Ok(msg) => {
+                                            ctx.text(msg);
+                                        }
+                                        Err(TryRecvError::Empty) => {}
+                                        Err(TryRecvError::Closed) => {
+                                            ctx.stop();
+                                        }
                                     }
                                 });
                             } else {

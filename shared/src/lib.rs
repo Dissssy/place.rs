@@ -116,7 +116,7 @@ impl Place {
         if let Some(user) = user {
             user.timeout = thisnow + self.config.timeout;
         } else {
-            let mut thisuser = self.users.iter().find(|user| user.id == newuser).ok_or(anyhow::anyhow!("User not found"))?.clone();
+            let mut thisuser = self.users.iter().find(|user| user.id == newuser).ok_or_else(|| anyhow::anyhow!("User not found"))?.clone();
             thisuser.timeout = thisnow + self.config.timeout;
             self.users.push(thisuser);
         }
@@ -135,8 +135,8 @@ impl Place {
         self.websockets.retain(|websocket| websocket.id != id);
     }
     pub async fn save_pixel(&self, pixel: Pixel) -> Result<(), Error> {
-        let newuser = pixel.user.as_ref().ok_or(anyhow!("No user"))?.clone();
-        let user = self.users.iter().find(|user| user.id == newuser).ok_or(anyhow::anyhow!("User not found"))?.clone();
+        let newuser = pixel.user.as_ref().ok_or_else(|| anyhow!("No user"))?.clone();
+        let user = self.users.iter().find(|user| user.id == newuser).ok_or_else(|| anyhow::anyhow!("User not found"))?.clone();
         self.handler.save_pixel(pixel, user).await
     }
     pub async fn set_username(&mut self, id: String, username: String) -> Result<(), Error> {
