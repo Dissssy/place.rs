@@ -85,7 +85,7 @@ impl PlaceInterface for GzipInterface {
             let mut file = std::io::BufReader::new(file);
             let mut buffer = Vec::new();
             file.read_to_end(&mut buffer)?;
-            let r = Place::gun_unzip(&buffer)?;
+            let r = Place::gun_unzip(&buffer).await?;
             if XY::from_nested_vec(&r.data).unwrap() != CONFIG.size {
                 println!("Size mismatch, if you want to change the size, delete or rename `{:?}` and restart the server.", &self.path)
             }
@@ -100,7 +100,7 @@ impl PlaceInterface for GzipInterface {
         std::fs::create_dir_all(self.path.parent().ok_or_else(|| anyhow!("No parent"))?)?;
         // using place.gun_zip() to get the zipped data, then writing it to the file
         let mut file = std::fs::File::create(&self.path)?;
-        let data = place.gun_zip()?;
+        let data = place.gun_zip().await?;
         file.write_all(&data)?;
         Ok(())
     }

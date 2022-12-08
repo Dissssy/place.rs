@@ -24,12 +24,12 @@ impl Place {
             users: HashMap::new(),
         }
     }
-    pub fn gun_zip(&self) -> Result<Vec<u8>, Error> {
+    pub async fn gun_zip(&self) -> Result<Vec<u8>, Error> {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&serde_json::to_vec(&self)?)?;
         Ok(encoder.finish()?)
     }
-    pub fn gun_unzip(data: &[u8]) -> Result<Place, Error> {
+    pub async fn gun_unzip(data: &[u8]) -> Result<Place, Error> {
         let mut decoder = flate2::read::GzDecoder::new(data);
         let mut buffer = Vec::new();
         decoder.read_to_end(&mut buffer)?;

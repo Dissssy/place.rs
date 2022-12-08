@@ -1,8 +1,11 @@
 #![allow(clippy::await_holding_lock)]
-use actix::fut::wrap_future;
 use actix::ActorContext;
 use actix::AsyncContext;
+use actix::ContextFutureSpawner;
+use actix::Handler;
+use actix::Message;
 use actix::StreamHandler;
+use actix::WrapFuture;
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
 use actix_web_actors::ws;
 use actix_web_actors::ws::CloseCode;
@@ -103,6 +106,28 @@ struct WsConnection {
     place_requested: bool,
 }
 
+impl Handler<Bin> for WsConnection {
+    type Result = ();
+
+    fn handle(&mut self, msg: Bin, ctx: &mut Self::Context) {
+        match msg.bin {
+            Ok(bin) => {
+                self.place_requested = true;
+                ctx.binary(bin);
+            }
+            Err(e) => {
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+            }
+        }
+    }
+}
+
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct Bin {
+    bin: Result<Vec<u8>, Error>,
+}
+
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         let now = chrono::Utc::now().timestamp() as u64;
@@ -162,18 +187,29 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                             if !self.place_requested {
                                 let place = self.place.lock().unwrap();
                                 let p = place.place.clone();
-                                ctx.run_later(std::time::Duration::from_millis(0), move |act, ctx| {
-                                    let bin = p.gun_zip();
-                                    match bin {
-                                        Ok(bin) => {
-                                            act.place_requested = true;
-                                            ctx.binary(bin)
-                                        }
-                                        Err(e) => {
-                                            ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
-                                        }
-                                    }
-                                });
+                                let recipient = ctx.address().recipient();
+                                let future = async move { recipient.do_send(Bin { bin: p.gun_zip().await }) };
+                                future.into_actor(self).spawn(ctx);
+                                // let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>, Error>>();
+                                // let h = ctx.spawn(wrap_future(async move {
+                                //     tx.send().unwrap();
+                                // }));
+                                // loop {
+                                //     match rx.try_recv() {
+                                //         Ok(bin) => {
+
+                                //             break;
+                                //         }
+                                //         Err(e) => match e {
+                                //             TryRecvError::Empty => {}
+                                //             TryRecvError::Disconnected => {
+                                //                 break;
+                                //             }
+                                //         },
+                                //     }
+                                //     // wait for 100ms
+                                //     std::thread::sleep(std::time::Duration::from_millis(100));
+                                // }
                             } else {
                                 ctx.text(serde_json::to_string(&ToClientMsg::GenericError("You have already requested the place".to_string())).unwrap());
                             }
