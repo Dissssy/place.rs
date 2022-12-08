@@ -1,4 +1,5 @@
 #![allow(clippy::await_holding_lock)]
+use actix::fut::wrap_future;
 use actix::ActorContext;
 use actix::AsyncContext;
 use actix::StreamHandler;
@@ -159,15 +160,20 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                         ToServerMsg::RequestPlace => {
                             // client is requesting a gzipped place, this operation is very expensive so we only allow it once per connection
                             if !self.place_requested {
-                                self.place_requested = true;
                                 let place = self.place.lock().unwrap();
-                                let bin = place.place.gun_zip();
-                                match bin {
-                                    Ok(bin) => ctx.binary(bin),
-                                    Err(e) => {
-                                        ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                                let p = place.place.clone();
+                                ctx.run_later(std::time::Duration::from_millis(0), move |act, ctx| {
+                                    let bin = p.gun_zip();
+                                    match bin {
+                                        Ok(bin) => {
+                                            act.place_requested = true;
+                                            ctx.binary(bin)
+                                        }
+                                        Err(e) => {
+                                            ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                                        }
                                     }
-                                }
+                                });
                             } else {
                                 ctx.text(serde_json::to_string(&ToClientMsg::GenericError("You have already requested the place".to_string())).unwrap());
                             }
