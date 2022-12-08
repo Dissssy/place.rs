@@ -38,7 +38,6 @@ impl Place {
     pub async fn gun_unzip(data: Vec<u8>) -> Result<Place, Error> {
         // spawn in seperate thread to avoid blocking the async runtime
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let data = data.clone();
         std::thread::spawn(move || {
             let mut decoder = flate2::read::GzDecoder::new(&data[..]);
             let mut buffer = Vec::new();
