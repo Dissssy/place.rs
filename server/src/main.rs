@@ -178,6 +178,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
             }
             Ok(ws::Message::Close(reason)) => {
                 self.place.lock().unwrap().remove_websocket(&self.id);
+                println!("Closing websocket: {:?}", reason);
                 ctx.close(reason);
                 ctx.stop();
             }
@@ -212,6 +213,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                 Err(err) => match err {
                     TryRecvError::Empty => {}
                     TryRecvError::Disconnected => {
+                        println!("Message channel disconnected");
                         ctx.close(Some(CloseReason {
                             code: CloseCode::Error,
                             description: Some(serde_json::to_string(&ToClientMsg::GenericError("Disconnected".to_string())).unwrap()),
@@ -224,6 +226,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
             if act.sent_heartbeats > CONFIG.max_missed_heartbeats {
                 act.sent_heartbeats += 1;
             } else {
+                println!("Heartbeat timeout");
                 ctx.close(Some(CloseReason {
                     code: CloseCode::Error,
                     description: Some("Heartbeat timeout".to_string()),
