@@ -1,347 +1,87 @@
-use actix::fut::wrap_future;
-use actix::prelude::*;
-use actix_web::dev::Path;
-use actix_web::dev::ServerHandle;
+#![allow(clippy::await_holding_lock)]
+use actix::ActorContext;
+use actix::AsyncContext;
+use actix::StreamHandler;
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
 use actix_web_actors::ws;
-use place_rs_shared::SafeInfo;
-use serde::{Deserialize, Serialize};
+use actix_web_actors::ws::CloseCode;
+use actix_web_actors::ws::CloseReason;
+use anyhow::Error;
+use config::Timeouts;
+use interfaces::PostgresConfig;
+use lazy_static::lazy_static;
+use place_rs_shared::messages::TimeoutType;
+use place_rs_shared::messages::ToServerMsg;
 use sha2::Digest;
 use sha2::Sha256;
-use tokio::sync::oneshot::error::TryRecvError;
-// use sqlx::postgres::PgPoolOptions;
-use std::sync::mpsc;
 use std::sync::Arc;
+use tokio::sync::mpsc::error::TryRecvError;
+mod config;
+mod interfaces;
+use config::Config;
+use place_rs_shared::{messages::ToClientMsg, program_path, MetaPlace, User};
+use std::sync::Mutex;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::oneshot;
-use tokio::sync::Mutex;
 
-use actix_web::{get, web, App, HttpServer, Responder};
-use place_rs_shared::{Color, Pixel, Place, RawWebsocketMessage, ServerConfig, User, XY};
-
-#[get("/api/canvas/{x}/{y}")]
-async fn api_canvas(data: web::Data<Arc<Mutex<Place>>>, coord: web::Path<(usize, usize)>) -> impl Responder {
-    // serve the current state of the canvas as json
-    // we will take advantage of chunking to make this a faster process, x and y are the 128x128 chunk coordinates
-    let data = data.lock().await;
-    let chunk = data.get_chunk(coord.0, coord.1);
-    web::Json(chunk)
+lazy_static! {
+    static ref CONFIG: Config = Config::new().unwrap();
 }
 
-#[get("/api/info")]
-async fn api_info() -> impl Responder {
-    let config = ServerConfig::load().unwrap();
-    let info = SafeInfo {
-        timeout: config.timeout,
-        size: config.size,
-        chunk_size: config.chunk_size,
-    };
-    web::Json(info)
-}
-
-// an api endpoint to restart the server, debugging purposes
-#[get("/api/restart")]
-async fn stop(stop_handle: web::Data<StopHandle>) -> HttpResponse {
-    stop_handle.stop(true);
-    HttpResponse::NoContent().finish()
-}
-
-#[get("/api/user/{id}")]
-async fn api_user(data: web::Data<Arc<Mutex<Place>>>, id: web::Path<String>) -> impl Responder {
-    // println!("{}", id);
-    let data = data.lock().await;
-    let user = data.get_user(&id).cloned();
-    // println!("{:?}", user);
-    // println!("{:?}", data.users);
-    web::Json(user)
-}
-
-#[actix_web::main] // or #[tokio::main]
+#[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let config = ServerConfig::load().unwrap();
-    // we will run a websocket server on the same port as the http server under the /ws path, this will serve live events and updates to the client, specifically when a pixel changes, and the current timeout for the user. the user will push messages to this websocket to update a pixel
-    // we will run a http server on the same port as the websocket server under the /api path, this will serve the basic api endpoints to get the current state of the canvas, to get the user up to date
-    let place = Arc::new(Mutex::new(Place::load().await.unwrap()));
-    let stop_handle = web::Data::new(StopHandle::default());
-    let sandle = stop_handle.clone();
-    let place_clone = place.clone();
-    println!("Starting server on port {}", config.port);
-    let x = HttpServer::new(move || {
-        let stop_handle = stop_handle.clone();
-        App::new()
-            .app_data(web::Data::new(place_clone.clone()))
-            .app_data(stop_handle)
-            .service(api_canvas)
-            .service(api_user)
-            .service(api_info)
-            .service(stop)
-            .route("/ws/", web::get().to(ws_index))
-    })
-    .bind((config.host, config.port))?
-    .run();
-    sandle.register(x.handle());
-    let x = x.await;
+    let place = get_server_place().await.unwrap();
+    println!("Starting server on {}:{}", CONFIG.host, CONFIG.port);
+    /*let x = */
+    HttpServer::new(move || App::new().route("/ws/", web::get().to(ws)))
+        .bind((CONFIG.host.clone(), CONFIG.port))?
+        .run()
+        .await
+        .expect("Failed to start server");
 
-    println!("{:?}", x);
-    println!("Shutting down server");
-    println!("Saving canvas");
-    let place = place.lock().await;
-    println!("{:?}", place.handler.save(place.get_save_data()).await);
-
-    x
+    place.lock().unwrap().save().await.unwrap();
+    Ok(())
 }
 
-#[derive(Default)]
-struct StopHandle {
-    inner: std::sync::Mutex<Option<ServerHandle>>,
-}
-
-impl StopHandle {
-    /// Sets the server handle to stop.
-    pub(crate) fn register(&self, handle: ServerHandle) {
-        let mut binding = self.inner.lock();
-        let t = binding.as_deref_mut().unwrap();
-        let mut handle = Some(handle);
-        std::mem::swap(t, &mut handle);
-    }
-
-    /// Sends stop signal through contained server handle.
-    pub(crate) fn stop(&self, graceful: bool) {
-        let _ = self.inner.lock().unwrap().take().unwrap().stop(graceful);
+async fn get_server_place() -> Result<Arc<Mutex<MetaPlace>>, Error> {
+    match &CONFIG.interface {
+        interfaces::Interface::Json => get_json_place().await,
+        interfaces::Interface::Postgres(config) => get_postgres_place(config.clone()).await,
+        interfaces::Interface::Gzip => get_gzip_place().await,
     }
 }
 
-use actix::{Actor, StreamHandler};
-use actix_web::{HttpRequest, HttpResponse};
-
-/// Define HTTP actor
-struct MyWs {
-    place: Arc<Mutex<Place>>,
-    rx: Option<UnboundedReceiver<WebsocketMessage>>,
-    id: String,
-    user: Option<User>,
-    lasthb: std::time::Instant,
-    heartbeats: i64,
-    timeout: i64,
+async fn get_json_place() -> Result<Arc<Mutex<MetaPlace>>, Error> {
+    let mut path = program_path()?;
+    path.push("place.json");
+    Ok(Arc::new(Mutex::new(MetaPlace::new(Box::new(interfaces::JsonInterface::new(path))).await?)))
 }
 
-impl MyWs {
-    pub fn heartbeat(&mut self) -> bool {
-        let now = std::time::Instant::now();
-        if now.duration_since(self.lasthb) > std::time::Duration::from_secs(5) {
-            self.lasthb = now;
-            self.heartbeats += 1;
-            return true;
-        }
-        false
-    }
+async fn get_postgres_place(_config: PostgresConfig) -> Result<Arc<Mutex<MetaPlace>>, Error> {
+    // Ok(Arc::new(Mutex::new(MetaPlace::new(Box::new(interfaces::PostgresInterface::new(config).await?)).await?)))
+    todo!()
 }
 
-impl Actor for MyWs {
-    // we will need two way async communication with the websocket, so we will use an unbounded channel
-    type Context = ws::WebsocketContext<Self>;
+async fn get_gzip_place() -> Result<Arc<Mutex<MetaPlace>>, Error> {
+    let mut path = program_path()?;
+    path.push("place.gz");
+    Ok(Arc::new(Mutex::new(MetaPlace::new(Box::new(interfaces::GzipInterface::new(path))).await?)))
 }
 
-// we need to be able to handle messages FROM the websocket, and push messages TO the websocket
-// we will use the WebSocketMessage enum from the shared crate to handle this
-use place_rs_shared::WebsocketMessage;
-
-async fn ws_index(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<Place>>>) -> Result<HttpResponse, actix_web::Error> {
+async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<MetaPlace>>>) -> Result<HttpResponse, actix_web::Error> {
     let place = data.get_ref().clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let id = hash(req.peer_addr().unwrap().ip().to_string());
-    let user = place.lock().await.add_websocket(id.clone(), tx);
-    let config = ServerConfig::load().unwrap();
-    let myws = MyWs {
+    let user = place.lock().unwrap().add_websocket(id.clone(), tx);
+    let myws = WsConnection {
         place,
         rx: Some(rx),
         user,
         id,
-        lasthb: std::time::Instant::now(),
-        heartbeats: 0,
-        timeout: config.username_timeout,
+        sent_heartbeats: 0,
+        timeouts: Timeouts::default(),
+        place_requested: false,
     };
     ws::start(myws, &req, stream)
-}
-
-// listen for messages from the websocket and handle them, while using heartbeat to keep the connection alive
-// #[async_trait::async_trait]
-impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
-    fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
-        match msg {
-            Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
-            Ok(ws::Message::Text(text)) => {
-                // let th = RawWebsocketMessage::PixelUpdate {
-                //     x: 0,
-                //     y: 0,
-                //     color: Color { r: 0, g: 0, b: 0 },
-                // };
-                // println!("json: {}", serde_json::to_string(&th).unwrap());
-                // we will use the WebsocketMessage enum from the shared crate to handle this
-                let msg = serde_json::from_str::<RawWebsocketMessage>(&text);
-                if let Ok(msg) = msg {
-                    match msg {
-                        RawWebsocketMessage::PixelUpdate { location, color } => {
-                            if self.rx.is_some() {
-                                let err = serde_json::to_string(&WebsocketMessage::Error("Initialise the listener first".to_string())).unwrap();
-                                ctx.text(err);
-                                return;
-                            }
-                            let user = self.user.clone();
-                            if let Some(user) = user {
-                                let time = chrono::Utc::now().timestamp();
-                                let pixel = Pixel {
-                                    location,
-                                    color,
-                                    timestamp: Some(time),
-                                    user: Some(user.id),
-                                };
-                                let (tx, mut rx) = oneshot::channel::<String>();
-                                let f = wrap_future(update_pixel(pixel, self.place.clone(), tx));
-                                ctx.spawn(f);
-                                ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
-                                    if let Ok(msg) = rx.try_recv() {
-                                        let err = serde_json::to_string(&WebsocketMessage::Error(msg)).unwrap();
-                                        ctx.text(err);
-                                    }
-                                });
-                            } else {
-                                let err = serde_json::to_string(&WebsocketMessage::Error("Set a nickname first".to_string())).unwrap();
-                                ctx.text(err);
-                            }
-                        }
-                        RawWebsocketMessage::Heartbeat => {
-                            if self.rx.is_some() {
-                                let err = serde_json::to_string(&WebsocketMessage::Error("Initialise the listener first".to_string())).unwrap();
-                                ctx.text(err);
-                                return;
-                            }
-                            // send the heartbeat to the websocket
-                            self.heartbeats = 0;
-                        }
-                        RawWebsocketMessage::Listen => {
-                            // check if the handle is already set, if it is, return an error message
-
-                            let rx = self.rx.take();
-                            if let Some(mut rx) = rx {
-                                ctx.run_interval(std::time::Duration::from_millis(100), move |act, ctx| {
-                                    // check if the websocket is still connected
-                                    if !ctx.state().alive() {
-                                        // if it is not, remove the websocket from the place
-                                        // act.place.lock().await.remove_websocket(hash(act.id.clone()));
-                                        ctx.stop();
-                                        return;
-                                    }
-                                    // check if there is a message in the channel
-                                    if let Ok(msg) = rx.try_recv() {
-                                        // if there is, send it to the websocket
-                                        ctx.text(serde_json::to_string(&msg).unwrap());
-                                    }
-                                    if act.heartbeat() {
-                                        if act.heartbeats > 5 {
-                                            ctx.stop();
-                                        } else {
-                                            ctx.text(serde_json::to_string(&WebsocketMessage::Heartbeat).unwrap());
-                                        }
-                                    }
-                                });
-                                let listeningmsg = WebsocketMessage::Listening;
-                                ctx.text(serde_json::to_string(&listeningmsg).unwrap());
-                                // let (mtx, mut mrx) = tokio::sync::mpsc::unbounded_channel::<String>();
-                                // let (ktx, mut krx) = tokio::sync::oneshot::channel::<()>();
-                                // let _: Promise<()> = Promise::spawn_thread(format!("listener:{}", self.ip), move || {
-                                //     loop {
-                                //         if let Ok(()) = krx.try_recv() {
-                                //             break;
-                                //         }
-                                //         // check if there is a message in the channel
-                                //         if let Ok(msg) = rx.try_recv() {
-                                //             // send the message to the websocket
-                                //             mtx.send(serde_json::to_string(&msg).unwrap()).unwrap();
-                                //         }
-                                //         // sleep for 100ms
-                                //         std::thread::sleep();
-                                //     }
-                                // });
-                            } else {
-                                let err = serde_json::to_string(&WebsocketMessage::Error("Already listening".to_string())).unwrap();
-                                ctx.text(err);
-                            }
-                        }
-                        RawWebsocketMessage::SetUsername(username) => {
-                            if self.rx.is_some() {
-                                let err = serde_json::to_string(&WebsocketMessage::Error("Initialise the listener first".to_string())).unwrap();
-                                ctx.text(err);
-                                return;
-                            }
-                            let now = chrono::Utc::now().timestamp();
-                            // if the users timeout is less than the current time then error
-                            if let Some(user) = self.user.as_mut() {
-                                if user.username_timeout > now {
-                                    let err = serde_json::to_string(&WebsocketMessage::Error("You are timed out".to_string())).unwrap();
-                                    ctx.text(err);
-                                    return;
-                                }
-                                user.name = username;
-                                user.username_timeout = now + self.timeout;
-                            } else {
-                                self.user = Some(User {
-                                    name: username,
-                                    id: self.id.clone(),
-                                    username_timeout: now + self.timeout,
-                                    timeout: 0,
-                                });
-                            };
-                            let (tx, mut rx) = oneshot::channel::<String>();
-                            let f = wrap_future(set_username(self.user.clone().unwrap(), self.place.clone(), tx));
-                            ctx.spawn(f);
-                            // ctx.run_interval(std::time::Duration::from_millis(100), move |_act, ctx| {
-                            //     if let Ok(msg) = rx.try_recv() {
-                            //         ctx.text(msg);
-                            //     }
-                            // println!("waiting for username");
-                            loop {
-                                match rx.try_recv() {
-                                    Ok(msg) => {
-                                        let msg = serde_json::to_string(&WebsocketMessage::Error(msg)).unwrap();
-                                        ctx.text(msg);
-                                    }
-                                    Err(TryRecvError::Empty) => {}
-                                    Err(TryRecvError::Closed) => {
-                                        break;
-                                    }
-                                }
-                            }
-                            // });
-                            // println!("{:?}", self.user);
-                        }
-                        _ => {
-                            ctx.text(
-                                serde_json::to_string(&RawWebsocketMessage::Error {
-                                    message: "Unknown message".to_string(),
-                                })
-                                .unwrap(),
-                            );
-                        }
-                    }
-                } else {
-                    ctx.text(
-                        serde_json::to_string(&RawWebsocketMessage::Error {
-                            message: "Invalid message".to_string(),
-                        })
-                        .unwrap(),
-                    );
-                }
-            }
-            Ok(ws::Message::Close(reason)) => {
-                // remove the websocket from the place
-                // let mut place = self.place.lock().await;
-                // place.remove_websocket(ctx.address());
-                ctx.close(reason);
-                ctx.stop();
-            }
-            _ => ctx.stop(),
-        }
-    }
 }
 
 fn hash(s: String) -> String {
@@ -351,19 +91,146 @@ fn hash(s: String) -> String {
     format!("{:x}", result)
 }
 
-async fn update_pixel(pixel: Pixel, place: Arc<Mutex<Place>>, tx: oneshot::Sender<String>) {
-    let mut place = place.lock().await;
-    let r = place.set_pixel(pixel).await;
-    if let Err(r) = r {
-        tx.send(r.to_string()).unwrap();
+struct WsConnection {
+    place: Arc<Mutex<MetaPlace>>,
+    rx: Option<UnboundedReceiver<ToClientMsg>>,
+    id: String,
+    user: Option<User>,
+    sent_heartbeats: u32,
+    timeouts: Timeouts,
+    place_requested: bool,
+}
+
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
+    fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
+        let now = chrono::Utc::now().timestamp() as u64;
+        match msg {
+            Ok(ws::Message::Text(text)) => {
+                let msg = serde_json::from_str::<ToServerMsg>(&text);
+                match msg {
+                    Ok(msg) => match msg {
+                        ToServerMsg::Heartbeat => {
+                            self.sent_heartbeats = 0;
+                        }
+                        ToServerMsg::SetName(name) => {
+                            if now < self.timeouts.username {
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Username(CONFIG.timeouts.username))).unwrap());
+                            } else {
+                                self.timeouts.username = now + CONFIG.timeouts.username;
+                                if let Some(user) = &self.user {
+                                    let r = self.place.lock().unwrap().update_username(&user.id, &name);
+                                    match r {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                                        }
+                                    }
+                                } else {
+                                    let user = User { id: self.id.clone(), name };
+                                    let r = self.place.lock().unwrap().add_user(user.clone());
+                                    match r {
+                                        Ok(_) => {
+                                            self.user = Some(user);
+                                        }
+                                        Err(e) => {
+                                            ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ToServerMsg::SetPixel(pixel) => {
+                            if now < self.timeouts.paint {
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Pixel(CONFIG.timeouts.paint))).unwrap());
+                            } else if self.user.is_some() {
+                                self.timeouts.paint = now + CONFIG.timeouts.paint;
+                                let r = self.place.lock().unwrap().update_pixel(&pixel.into_full(self.id.clone()));
+                                match r {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                                    }
+                                }
+                            } else {
+                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("You must set a username before painting".to_string())).unwrap());
+                            }
+                        }
+                        ToServerMsg::RequestPlace => {
+                            // client is requesting a gzipped place, this operation is very expensive so we only allow it once per connection
+                            if !self.place_requested {
+                                self.place_requested = true;
+                                let place = self.place.lock().unwrap();
+                                let bin = place.place.gun_zip();
+                                match bin {
+                                    Ok(bin) => ctx.binary(bin),
+                                    Err(e) => {
+                                        ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                                    }
+                                }
+                            } else {
+                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("You have already requested the place".to_string())).unwrap());
+                            }
+                        }
+                    },
+                    Err(e) => ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap()),
+                }
+            }
+            Ok(ws::Message::Close(reason)) => {
+                self.place.lock().unwrap().remove_websocket(&self.id);
+                ctx.close(reason);
+                ctx.stop();
+            }
+            Ok(ws::Message::Ping(msg)) => {
+                ctx.pong(&msg);
+            }
+            Ok(ws::Message::Pong(_)) => {
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("Unsupported method Pong".to_string())).unwrap());
+            }
+            Ok(ws::Message::Binary(_)) => {
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("Unsupported method Binary".to_string())).unwrap());
+            }
+            Ok(ws::Message::Nop) => {
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("Unsupported method Nop".to_string())).unwrap());
+            }
+            Ok(ws::Message::Continuation(_)) => {
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("Unsupported method Continuation".to_string())).unwrap());
+            }
+            Err(e) => {
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+            }
+        }
+    }
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        let mut rx = self.rx.take().unwrap();
+        ctx.run_interval(std::time::Duration::from_millis(CONFIG.times.ws_msg_interval), move |_act, ctx| {
+            let x = rx.try_recv();
+            match x {
+                Ok(msg) => ctx.text(serde_json::to_string(&msg).unwrap()),
+                Err(err) => match err {
+                    TryRecvError::Empty => {}
+                    TryRecvError::Disconnected => {
+                        ctx.close(Some(CloseReason {
+                            code: CloseCode::Error,
+                            description: Some(serde_json::to_string(&ToClientMsg::GenericError("Disconnected".to_string())).unwrap()),
+                        }));
+                    }
+                },
+            }
+        });
+        ctx.run_interval(std::time::Duration::from_millis(CONFIG.times.ws_hb_interval), move |act, ctx| {
+            if act.sent_heartbeats < CONFIG.max_missed_heartbeats {
+                act.sent_heartbeats += 1;
+            } else {
+                ctx.close(Some(CloseReason {
+                    code: CloseCode::Error,
+                    description: Some("Heartbeat timeout".to_string()),
+                }));
+            }
+        });
     }
 }
 
-async fn set_username(user: User, place: Arc<Mutex<Place>>, tx: oneshot::Sender<String>) {
-    let mut place = place.lock().await;
-    println!("setting username");
-    let r = place.set_username(user.id, user.name).await;
-    if let Err(r) = r {
-        tx.send(r.to_string()).unwrap();
-    }
+impl actix::Actor for WsConnection {
+    type Context = ws::WebsocketContext<Self>;
 }

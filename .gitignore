@@ -6,3 +6,6 @@ shared/target
 shared/Cargo.lock
 shared/comments.rs
 client/img.png
+client/src/old-main.rs
+server/src/old-main.rs
+shared/src/old-lib.rs

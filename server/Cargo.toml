@@ -19,3 +19,6 @@ chrono = "0.4.23"
 poll-promise = "0.2.0"
 # hashing crate
 sha2 = "0.10.6"
+lazy_static = "1.4.0"
+dirs = "4.0.0"
+sqlx = { version = "0.6.2", features = ["postgres", "runtime-tokio-rustls", "json", "chrono", "macros"] }

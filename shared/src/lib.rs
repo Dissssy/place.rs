@@ -1,586 +1,224 @@
-use anyhow::{anyhow, Error};
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres, Row};
+#![allow(dead_code)]
 use std::{
-    fmt::{Display, Formatter},
-    io::Write,
-    path::PathBuf,
-    str::FromStr,
+    collections::HashMap,
+    fmt::Formatter,
+    io::{Read, Write},
 };
+
+use anyhow::{anyhow, Error};
+use messages::ToClientMsg;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
+pub mod messages;
 
+#[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq)]
 pub struct Place {
-    pub data: Vec<Vec<Pixel>>,
-
-    pub users: Vec<User>,
-    pub handler: Box<dyn Handler>,
-    pub websockets: Vec<WebsocketHandler>,
-    pub config: ServerConfig,
-}
-
-impl Clone for Place {
-    fn clone(&self) -> Self {
-        Self {
-            data: self.data.clone(),
-            users: self.users.clone(),
-            handler: self.handler.clone(),
-            websockets: vec![],
-            config: self.config.clone(),
-        }
-    }
-}
-
-pub struct WebsocketHandler {
-    pub id: String,
-    pub handle: UnboundedSender<WebsocketMessage>,
-    pub closed: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum WebsocketMessage {
-    Pixel(Pixel),
-    User(User),
-    Heartbeat,
-    Listening,
-    Error(String),
+    pub data: Vec<Vec<PixelWithLocation>>,
+    pub users: HashMap<String, User>,
 }
 
 impl Place {
-    pub fn get_user(&self, id: &str) -> Option<&User> {
-        self.users.iter().find(|user| user.id == id)
-    }
-    pub async fn load() -> Result<Self, Error> {
-        let config = ServerConfig::load()?;
-        let p: Box<dyn Handler> = match config.handler {
-            HandlerType::Json => Box::new(JsonHandler::new()),
-            HandlerType::Postgres(data) => Box::new(PostgresHandler {
-                pool: PgPoolOptions::new().max_connections(5).connect(&get_pg_uri(data.clone())).await?,
-                data,
-            }),
-            // _ => unreachable!("Handler not implemented"),
-        };
-        let p = p.load().await;
-        if let Ok(p) = p {
-            Ok(p)
-        } else {
-            Err(p.err().unwrap())
+    pub fn new(size: XY) -> Place {
+        Place {
+            data: vec![vec![PixelWithLocation::default(); size.x as usize]; size.y as usize],
+            users: HashMap::new(),
         }
     }
-    pub fn get_save_data(&self) -> SaveData {
-        SaveData {
-            data: self.data.clone(),
-            users: self.users.clone(),
+    pub fn gun_zip(&self) -> Result<Vec<u8>, Error> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&serde_json::to_vec(&self)?)?;
+        Ok(encoder.finish()?)
+    }
+    pub fn gun_unzip(data: &[u8]) -> Result<Place, Error> {
+        let mut decoder = flate2::read::GzDecoder::new(data);
+        let mut buffer = Vec::new();
+        decoder.read_to_end(&mut buffer)?;
+        Ok(serde_json::from_slice(&buffer)?)
+    }
+}
+
+#[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct PixelWithLocation {
+    pub pixel: MaybePixel,
+    pub location: XY,
+}
+
+impl PixelWithLocation {
+    pub fn new(pixel: MaybePixel, location: XY) -> PixelWithLocation {
+        PixelWithLocation { pixel, location }
+    }
+}
+
+#[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct GenericPixelWithLocation {
+    pub color: Color,
+    pub location: XY,
+}
+
+impl GenericPixelWithLocation {
+    pub fn into_full(self, artist_id: String) -> PixelWithLocation {
+        PixelWithLocation {
+            pixel: MaybePixel::Pixel(Pixel { color: self.color, artist_id }),
+            location: self.location,
         }
     }
-    pub fn get_chunk(&self, x: usize, y: usize) -> Vec<Pixel> {
-        let mut chunk: Vec<Pixel> = Vec::new();
-        for i in 0..self.config.chunk_size {
-            for j in 0..self.config.chunk_size {
-                let pixel = self.data.get(x * self.config.chunk_size + i).and_then(|row| row.get(y * self.config.chunk_size + j));
-                if let Some(pixel) = pixel {
-                    chunk.push(pixel.clone());
-                }
+}
+
+#[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq)]
+pub enum MaybePixel {
+    Pixel(Pixel),
+    #[default]
+    None,
+}
+
+#[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct Pixel {
+    pub color: Color,
+    pub artist_id: String,
+}
+#[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq, Copy)]
+pub struct XY {
+    pub x: u16,
+    pub y: u16,
+}
+
+impl XY {
+    pub fn from_nested_vec(vec: &Vec<Vec<PixelWithLocation>>) -> Result<XY, Error> {
+        if vec.is_empty() {
+            return Err(anyhow!("Empty vec"));
+        }
+        let y = vec.len() as u16;
+        let x = vec[0].len() as u16;
+        for row in vec {
+            if row.len() != x as usize {
+                return Err(anyhow!("Uneven vec"));
             }
         }
-        chunk
+        Ok(XY { x, y })
     }
-    pub async fn set_pixel(&mut self, newpixel: Pixel) -> Result<(), Error> {
-        let now = chrono::Utc::now();
-        let thisnow = now.timestamp();
-        let newuser = newpixel.user.as_ref().ok_or(anyhow!("No user"))?.clone();
-        println!("{:?}", self.users);
-        let user = self.users.iter_mut().find(|user| user.id == newuser.clone());
-        if let Some(user) = user.as_ref() {
-            if user.timeout > thisnow {
-                return Err(anyhow::anyhow!("User is within timeout. Please wait {} seconds", user.timeout - thisnow));
-            }
-        }
+}
+#[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq, Copy)]
+pub struct Color {
+    r: u8,
+    g: u8,
+    b: u8,
+}
+#[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct User {
+    pub name: String,
+    pub id: String,
+}
 
-        let row = self.data.get_mut(newpixel.location.x).ok_or_else(|| anyhow::anyhow!("Pixel x out of bounds"))?;
-        let pixel = row.get_mut(newpixel.location.y).ok_or_else(|| anyhow::anyhow!("Pixel y out of bounds"))?;
+#[async_trait::async_trait]
+pub trait PlaceInterface {
+    async fn load(&self) -> Result<Place, Error>;
+    async fn save_all(&self, place: &Place) -> Result<(), Error>;
+    async fn save_pixel(&self, pixel: &PixelWithLocation) -> Result<(), Error>;
+    async fn save_user(&self, user: &User) -> Result<(), Error>;
+}
 
-        if pixel.color == newpixel.color {
-            return Err(anyhow::anyhow!("Pixel color is the same, paint not wasted"));
-        }
+pub struct MetaPlace {
+    pub place: Place,
+    pub interface: Box<dyn PlaceInterface>,
+    pub websockets: Vec<WebsocketHandler>,
+}
 
-        *pixel = newpixel.clone();
-
-        for websocket in self.websockets.iter_mut() {
-            let r = websocket.handle.send(WebsocketMessage::Pixel(newpixel.clone()));
-            if r.is_err() {
-                websocket.closed = true;
-            }
-        }
-        self.websockets.retain(|websocket| !websocket.closed);
-
-        if let Some(user) = user {
-            user.timeout = thisnow + self.config.timeout;
-        } else {
-            let mut thisuser = self.users.iter().find(|user| user.id == newuser).ok_or_else(|| anyhow::anyhow!("User not found"))?.clone();
-            thisuser.timeout = thisnow + self.config.timeout;
-            self.users.push(thisuser);
-        }
-        self.save_pixel(newpixel).await?;
-        Ok(())
+impl std::fmt::Debug for MetaPlace {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetaPlace").field("img", &self.place).field("interface", &"Box<dyn PlaceInterface>").finish()
     }
-    pub fn add_websocket(&mut self, id: String, handle: UnboundedSender<WebsocketMessage>) -> Option<User> {
+}
+
+impl MetaPlace {
+    pub fn add_websocket(&mut self, id: String, handle: UnboundedSender<ToClientMsg>) -> Option<User> {
         self.websockets.push(WebsocketHandler {
             id: id.clone(),
             handle,
             closed: false,
         });
-        self.users.iter().find(|user| user.id == id).cloned()
+        self.place.users.iter().find(|(uid, _)| uid == &&id).map(|(_, user)| user.clone())
     }
-    pub fn remove_websocket(&mut self, id: String) {
-        self.websockets.retain(|websocket| websocket.id != id);
+    pub fn remove_websocket(&mut self, id: &str) {
+        self.websockets.retain(|ws| ws.id != id);
     }
-    pub async fn save_pixel(&self, pixel: Pixel) -> Result<(), Error> {
-        let newuser = pixel.user.as_ref().ok_or_else(|| anyhow!("No user"))?.clone();
-        let user = self.users.iter().find(|user| user.id == newuser).ok_or_else(|| anyhow::anyhow!("User not found"))?.clone();
-        self.handler.save_pixel(pixel, user).await
+    pub async fn new(interface: Box<dyn PlaceInterface>) -> Result<MetaPlace, Error> {
+        let place = interface.load().await?;
+        Ok(MetaPlace { place, interface, websockets: vec![] })
     }
-    pub async fn set_username(&mut self, id: String, username: String) -> Result<(), Error> {
-        let user = self.users.iter_mut().find(|user| user.id == id);
-        if let Some(user) = user {
-            user.name = username;
-            // iter over all pixels and change the username if it matches the id
-            // for row in self.data.iter_mut() {
-            //     for pixel in row.iter_mut() {
-            //         if pixel.user == id {
-            //              = username.clone();
-            //         }
-            //     }
-            // }
-            for websocket in self.websockets.iter_mut() {
-                let r = websocket.handle.send(WebsocketMessage::User(user.clone()));
-                if r.is_err() {
-                    websocket.closed = true;
-                }
-            }
-            self.websockets.retain(|websocket| !websocket.closed);
-            Ok(())
-        } else {
-            println!("User not found");
-            self.users.push(User {
-                id,
-                name: username,
-                timeout: 0,
-                username_timeout: chrono::Utc::now().timestamp() + self.config.username_timeout,
-            });
-            Ok(())
-        }
-    }
-}
-
-pub fn get_blank_data(size: XY) -> Vec<Vec<Pixel>> {
-    let mut data = Vec::new();
-    for y in 0..size.y {
-        let mut row = Vec::new();
-        for x in 0..size.x {
-            row.push(Pixel::new(x, y));
-        }
-        data.push(row);
-    }
-    data
-}
-
-pub struct JsonHandler;
-
-#[async_trait]
-impl Handler for JsonHandler {
-    async fn load(&self) -> Result<Place, Error> {
-        let mut path = get_data_path();
-        path.push("data.json");
-        let config = ServerConfig::load()?;
-
-        if !path.exists() {
-            let data = get_blank_data(get_size());
-            let place = Place {
-                data,
-                users: vec![],
-                handler: Box::new(Self::new()),
-                websockets: Vec::new(),
-                config,
-            };
-
-            let p = place.handler.save(place.get_save_data());
-            if p.await.is_ok() {
-                Ok(place)
-            } else {
-                Err(anyhow!("Error saving"))
-            }
-        } else {
-            let file = std::fs::File::open(path)?;
-            let data: SaveData = serde_json::from_reader(file)?;
-            Ok(Place {
-                data: data.data,
-                users: data.users,
-                handler: Box::new(Self::new()),
-                websockets: Vec::new(),
-                config,
-            })
-        }
-    }
-    async fn save(&self, data: SaveData) -> Result<(), Error> {
-        let mut path = get_data_path();
-        path.push("data.json");
-        let file = std::fs::File::create(path)?;
-        serde_json::to_writer_pretty(file, &data)?;
+    pub async fn save_pixel(&mut self, pixel: &PixelWithLocation) -> Result<(), Error> {
+        self.interface.save_pixel(pixel).await?;
+        self.place.data[pixel.location.y as usize][pixel.location.x as usize] = pixel.clone();
         Ok(())
     }
-    async fn save_pixel(&self, _pixel: Pixel, user: User) -> Result<(), Error> {
-        Ok(())
+    pub async fn save(&mut self) -> Result<(), Error> {
+        self.interface.save_all(&self.place).await
     }
-    fn clone(&self) -> Box<dyn Handler> {
-        Box::new(Self::new())
-    }
-}
-
-pub struct PostgresHandler {
-    data: PostgresConfig,
-    pool: Pool<Postgres>,
-}
-
-fn get_pg_uri(data: PostgresConfig) -> String {
-    format!("postgres://{}:{}@{}:{}/{}", data.username, data.password, data.host, data.port, data.database)
-}
-
-// #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-// pub enum LazyUser {
-//     Id(String),
-//     User(User),
-//     None,
-// }
-
-#[async_trait]
-impl Handler for PostgresHandler {
-    async fn save(&self, _data: SaveData) -> Result<(), Error> {
-        Ok(())
-    }
-
-    async fn load(&self) -> Result<Place, Error> {
-        println!("Loading from postgres");
-        let config = ServerConfig::load()?;
-
-        let mut data = get_blank_data(config.size);
-
-        let mut users = Vec::new();
-        println!("Loading data");
-        let mut count = 0;
-        let rows = sqlx::query("SELECT * FROM data").fetch_all(&self.pool).await?;
-        for row in rows {
-            let x: i32 = row.get("x");
-            let x = x as usize;
-            let y: i32 = row.get("y");
-            let y = y as usize;
-            // let timeout: i32 = row.get("user_timeout");
-            // let timeout = timeout as i64;
-            let rtimestamp: i32 = row.get("timestamp");
-            let timestamp = Some(rtimestamp as i64);
-
-            let trow = data.get_mut(x);
-            if let Some(trow) = trow {
-                let tpixel = trow.get_mut(y);
-                if let Some(tpixel) = tpixel {
-                    let id: String = row.get("user_id");
-                    let pixel = Pixel {
-                        location: XY { x, y },
-                        color: Color::from_str(row.get("color"))?,
-                        user: Some(id.clone()),
-                        timestamp,
-                    };
-                    let user = User {
-                        id,
-                        timeout: rtimestamp as i64,
-                        name: row.get("user_name"),
-                        username_timeout: rtimestamp as i64,
-                    };
-                    users.push(user);
-                    *tpixel = pixel.clone();
-                    count += 1;
-                }
+    pub fn update_username(&mut self, id: &str, name: &str) -> Result<(), Error> {
+        let user = self.place.users.get_mut(id).ok_or_else(|| anyhow!("No user with id {} found", id))?;
+        user.name = name.to_string();
+        // emit user update to all clients
+        self.websockets.retain(|ws| !ws.closed);
+        for ws in self.websockets.iter_mut() {
+            let r = ws.handle.send(ToClientMsg::UserUpdate(user.clone()));
+            if r.is_err() {
+                ws.closed = true;
             }
         }
-        println!("Loaded {} pixels", count);
-
-        users.sort_by(|a, b| b.timeout.cmp(&a.timeout));
-        users.dedup_by(|a, b| a.id == b.id);
-        println!("Loaded {} users", users.len());
-        // unlazify users
-        // for row in data.iter_mut() {
-        //     for pixel in row.iter_mut() {
-        //         if let LazyUser::Id(id) = &pixel.user {
-        //             if let Some(user) = users.iter().find(|user| user.id == *id) {
-        //                 pixel.user = LazyUser::User(user.clone());
-        //             }
-        //         }
-        //     }
-        // }
-        Ok(Place {
-            data,
-            users,
-            handler: self.clone(),
-            websockets: Vec::new(),
-            config,
-        })
-    }
-
-    async fn save_pixel(&self, pixel: Pixel, user: User) -> Result<(), Error> {
-        // let user = match &pixel.user {
-        //     LazyUser::User(user) => user,
-        //     _ => return Err(anyhow!("Invalid user")),
-        // };
-        sqlx::query("INSERT INTO data (x, y, color, user_id, user_name, user_timeout, timestamp, uuid) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (uuid) DO UPDATE SET color = $3, user_id = $4, user_name = $5, user_timeout = $6, timestamp = $7").bind(pixel.location.x as i64).bind(pixel.location.y as i64).bind(&(pixel.color.to_string())).bind(&user.id).bind(&user.name).bind(user.timeout).bind(pixel.timestamp).bind(format!("{}:{}", pixel.location.x, pixel.location.y)).execute(&self.pool).await?;
+        self.websockets.retain(|ws| !ws.closed);
         Ok(())
     }
-
-    fn clone(&self) -> Box<dyn Handler> {
-        Box::new(Self {
-            data: self.data.clone(),
-            pool: self.pool.clone(),
-        })
-    }
-}
-
-pub fn get_size() -> XY {
-    let config = ServerConfig::load().unwrap();
-    config.size
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SaveData {
-    pub data: Vec<Vec<Pixel>>,
-    pub users: Vec<User>,
-}
-
-impl JsonHandler {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for JsonHandler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Pixel {
-    pub color: Color,
-
-    pub user: Option<String>,
-    pub location: XY,
-    pub timestamp: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
-pub struct XY {
-    pub x: usize,
-    pub y: usize,
-}
-
-impl Pixel {
-    pub fn new(x: usize, y: usize) -> Self {
-        Self {
-            color: Color::default(),
-            user: None,
-            location: XY { x, y },
-            timestamp: None,
+    pub fn add_user(&mut self, user: User) -> Result<(), Error> {
+        self.place.users.insert(user.id.clone(), user.clone());
+        // emit user update to all clients
+        self.websockets.retain(|ws| !ws.closed);
+        for ws in self.websockets.iter_mut() {
+            let r = ws.handle.send(ToClientMsg::UserUpdate(user.clone()));
+            if r.is_err() {
+                ws.closed = true;
+            }
         }
+        self.websockets.retain(|ws| !ws.closed);
+        Ok(())
+    }
+    pub fn update_pixel(&mut self, pixel: &PixelWithLocation) -> Result<(), Error> {
+        let row = self
+            .place
+            .data
+            .get_mut(pixel.location.y as usize)
+            .ok_or_else(|| anyhow!("Index {} on y out of bounds", pixel.location.y))?;
+        let p = row.get_mut(pixel.location.x as usize).ok_or_else(|| anyhow!("Index {} on x out of bounds", pixel.location.x))?;
+        *p = pixel.clone();
+        // emit pixel update to all clients
+        self.websockets.retain(|ws| !ws.closed);
+        for ws in self.websockets.iter_mut() {
+            let r = ws.handle.send(ToClientMsg::PixelUpdate(pixel.clone()));
+            if r.is_err() {
+                ws.closed = true;
+            }
+        }
+        self.websockets.retain(|ws| !ws.closed);
+        Ok(())
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct User {
-    pub name: String,
+pub fn program_path() -> Result<std::path::PathBuf, Error> {
+    Ok(dirs::config_dir().ok_or_else(|| anyhow!("No config Dir found"))?.join("place_rs"))
+}
+
+pub struct WebsocketHandler {
     pub id: String,
-    pub timeout: i64,
-    pub username_timeout: i64,
+    pub handle: UnboundedSender<ToClientMsg>,
+    pub closed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct Color {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl FromStr for Color {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut chars = s.chars();
-        let r = u8::from_str_radix(&chars.by_ref().take(2).collect::<String>(), 16)?;
-        let g = u8::from_str_radix(&chars.by_ref().take(2).collect::<String>(), 16)?;
-        let b = u8::from_str_radix(&chars.by_ref().take(2).collect::<String>(), 16)?;
-        Ok(Self { r, g, b })
-    }
-}
-
-impl Display for Color {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:02x}{:02x}{:02x}", self.r, self.g, self.b)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerConfig {
-    pub host: String,
-    pub port: u16,
-    pub size: XY,
-    pub handler: HandlerType,
-    pub timeout: i64,
-    pub chunk_size: usize,
-    pub username_timeout: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ServerConfigGetting {
-    host: Option<String>,
-    port: Option<u16>,
-    size: Option<XY>,
-    handler: Option<HandlerType>,
-    timeout: Option<i64>,
-    chunk_size: Option<usize>,
-    username_timeout: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-
-pub enum HandlerType {
-    Json,
-    Postgres(PostgresConfig),
-}
-
-#[async_trait]
-pub trait Handler: Send {
-    async fn save(&self, data: SaveData) -> Result<(), Error>;
-    async fn load(&self) -> Result<Place, Error>;
-    async fn save_pixel(&self, pixel: Pixel, user: User) -> Result<(), Error>;
-    fn clone(&self) -> Box<dyn Handler>;
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostgresConfig {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub password: String,
-    pub database: String,
-}
-
-impl FromStr for HandlerType {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "json" => Ok(HandlerType::Json),
-            "postgres" => Ok(HandlerType::Postgres(PostgresConfig {
-                host: safe_getter(None, "Postgres host: "),
-                port: safe_getter(None, "Postgres port: "),
-                username: safe_getter(None, "Postgres username: "),
-                password: safe_getter(None, "Postgres password: "),
-                database: safe_getter(None, "Postgres database: "),
-            })),
-            _ => Err(anyhow::anyhow!("Invalid handler")),
+pub fn safe_get_from_terminal<T: std::str::FromStr>(name: &str) -> T {
+    loop {
+        println!("{}:", name);
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        match input.trim().parse::<T>() {
+            Ok(val) => return val,
+            Err(_) => println!("Please enter a valid {}!", std::any::type_name::<T>()),
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SafeInfo {
-    pub timeout: i64,
-    pub chunk_size: usize,
-    pub size: XY,
-}
-
-impl ServerConfig {
-    pub fn load() -> Result<Self, Error> {
-        let mut config_path = get_data_path();
-
-        std::fs::create_dir_all(&config_path)?;
-        config_path.push("server_config.json");
-
-        let config_getting: ServerConfigGetting = match std::fs::read_to_string(&config_path) {
-            Ok(config) => match serde_json::from_str::<ServerConfigGetting>(&config) {
-                Ok(config) => config,
-                Err(e) => {
-                    eprintln!("Error deserializing server config: {}", e);
-                    ServerConfigGetting {
-                        host: None,
-                        port: None,
-                        handler: None,
-                        timeout: None,
-                        chunk_size: None,
-                        size: None,
-                        username_timeout: None,
-                    }
-                }
-            },
-            Err(e) => {
-                eprintln!("Error reading server config: {}", e);
-                ServerConfigGetting {
-                    host: None,
-                    port: None,
-                    handler: None,
-                    timeout: None,
-                    chunk_size: None,
-                    size: None,
-                    username_timeout: None,
-                }
-            }
-        };
-        let item = Self {
-            host: safe_getter(config_getting.host, "Input host: "),
-            port: safe_getter(config_getting.port, "Input port: "),
-            handler: safe_getter(config_getting.handler, "Input handler: "),
-            timeout: safe_getter(config_getting.timeout, "Input timeout: "),
-            chunk_size: safe_getter(config_getting.chunk_size, "Input chunk size: "),
-            size: XY {
-                x: safe_getter(config_getting.size.map(|x| x.x), "Input width: "),
-                y: safe_getter(config_getting.size.map(|x| x.y), "Input height: "),
-            },
-            username_timeout: safe_getter(config_getting.username_timeout, "Input username timeout: "),
-        };
-
-        let mut file = std::fs::File::create(&config_path)?;
-        file.write_all(serde_json::to_string_pretty(&item)?.as_bytes())?;
-        Ok(item)
-    }
-}
-
-fn safe_getter<T: std::str::FromStr>(value: Option<T>, prompt: &str) -> T {
-    match value {
-        Some(value) => value,
-        None => {
-            let mut input = String::new();
-            loop {
-                print!("{}", prompt);
-                std::io::stdout().flush().unwrap();
-                std::io::stdin().read_line(&mut input).unwrap();
-                match input.trim().parse::<T>() {
-                    Ok(value) => break value,
-                    Err(_) => {
-                        println!("Invalid input");
-                        input.clear();
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn get_data_path() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from_str("./").unwrap()).join("place_rs")
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-pub enum RawWebsocketMessage {
-    PixelUpdate { location: XY, color: Color },
-    Heartbeat,
-    Error { message: String },
-    Listen,
-    SetUsername(String),
 }
