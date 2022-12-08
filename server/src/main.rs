@@ -137,7 +137,11 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                 match msg {
                     Ok(msg) => match msg {
                         ToServerMsg::Heartbeat => {
-                            self.sent_heartbeats = 0;
+                            if self.sent_heartbeats == 0 {
+                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("SHUT THE FUCK UP".to_string())).unwrap());
+                            } else {
+                                self.sent_heartbeats = 0;
+                            }
                         }
                         ToServerMsg::SetName(name) => {
                             if now < self.timeouts.username {
