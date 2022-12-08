@@ -25,15 +25,27 @@ impl Place {
         }
     }
     pub async fn gun_zip(&self) -> Result<Vec<u8>, Error> {
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(&serde_json::to_vec(&self)?)?;
-        Ok(encoder.finish()?)
+        // spawn in seperate thread to avoid blocking the async runtime
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let p = self.clone();
+        std::thread::spawn(move || {
+            let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(&serde_json::to_vec(&p).unwrap()).unwrap();
+            tx.send(encoder.finish().unwrap()).unwrap();
+        });
+        Ok(rx.await.unwrap())
     }
-    pub async fn gun_unzip(data: &[u8]) -> Result<Place, Error> {
-        let mut decoder = flate2::read::GzDecoder::new(data);
-        let mut buffer = Vec::new();
-        decoder.read_to_end(&mut buffer)?;
-        Ok(serde_json::from_slice(&buffer)?)
+    pub async fn gun_unzip(data: Vec<u8>) -> Result<Place, Error> {
+        // spawn in seperate thread to avoid blocking the async runtime
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let data = data.clone();
+        std::thread::spawn(move || {
+            let mut decoder = flate2::read::GzDecoder::new(&data[..]);
+            let mut buffer = Vec::new();
+            decoder.read_to_end(&mut buffer).unwrap();
+            tx.send(serde_json::from_slice(&buffer).unwrap()).unwrap();
+        });
+        Ok(rx.await.unwrap())
     }
 }
 

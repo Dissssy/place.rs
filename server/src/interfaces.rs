@@ -85,7 +85,7 @@ impl PlaceInterface for GzipInterface {
             let mut file = std::io::BufReader::new(file);
             let mut buffer = Vec::new();
             file.read_to_end(&mut buffer)?;
-            let r = Place::gun_unzip(&buffer).await?;
+            let r = Place::gun_unzip(buffer).await?;
             if XY::from_nested_vec(&r.data).unwrap() != CONFIG.size {
                 println!("Size mismatch, if you want to change the size, delete or rename `{:?}` and restart the server.", &self.path)
             }
