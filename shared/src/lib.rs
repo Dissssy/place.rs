@@ -110,7 +110,7 @@ pub struct User {
 }
 
 #[async_trait::async_trait]
-pub trait PlaceInterface {
+pub trait PlaceInterface: Send {
     async fn load(&self) -> Result<Place, Error>;
     async fn save_all(&self, place: &Place) -> Result<(), Error>;
     async fn save_pixel(&self, pixel: &PixelWithLocation) -> Result<(), Error>;

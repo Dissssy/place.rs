@@ -31,8 +31,9 @@ lazy_static! {
 async fn main() -> std::io::Result<()> {
     let place = get_server_place().await.unwrap();
     println!("Starting server on {}:{}", CONFIG.host, CONFIG.port);
+    let place_clone = place.clone();
     /*let x = */
-    HttpServer::new(move || App::new().route("/ws/", web::get().to(ws)))
+    HttpServer::new(move || App::new().app_data(web::Data::new(place_clone.clone())).route("/ws/", web::get().to(ws)))
         .bind((CONFIG.host.clone(), CONFIG.port))?
         .run()
         .await
