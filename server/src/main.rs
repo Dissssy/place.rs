@@ -203,7 +203,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
     }
 
     fn started(&mut self, ctx: &mut Self::Context) {
-        println!("Websocket connection started for {}", self.id);
+        // println!("Websocket connection started for {}", self.id);
         let mut rx = self.rx.take().unwrap();
         ctx.run_interval(std::time::Duration::from_millis(CONFIG.times.ws_msg_interval), move |_act, ctx| {
             let x = rx.try_recv();
@@ -221,7 +221,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
             }
         });
         ctx.run_interval(std::time::Duration::from_millis(CONFIG.times.ws_hb_interval), move |act, ctx| {
-            if act.sent_heartbeats < CONFIG.max_missed_heartbeats {
+            if act.sent_heartbeats > CONFIG.max_missed_heartbeats {
                 act.sent_heartbeats += 1;
             } else {
                 ctx.close(Some(CloseReason {
