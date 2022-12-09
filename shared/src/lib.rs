@@ -198,6 +198,23 @@ impl MetaPlace {
             .get_mut(pixel.location.y as usize)
             .ok_or_else(|| anyhow!("Index {} on y out of bounds", pixel.location.y))?;
         let p = row.get_mut(pixel.location.x as usize).ok_or_else(|| anyhow!("Index {} on x out of bounds", pixel.location.x))?;
+        if let (MaybePixel::Pixel(j), MaybePixel::Pixel(k)) = (p.pixel.clone(), pixel.pixel.clone()) {
+            if j.color == k.color {
+                return Err(anyhow!("Pixel already has color"));
+            }
+        }
+        // match p.pixel.clone() {
+        //     MaybePixel::Pixel(paxel) => {
+        //         match paxel {
+        //             MaybePixel::Pixel(puxel) => {
+        //                 if paxel.color == puxel.color {
+        //                     return Ok(());
+        //                 }
+        //             }
+        //         }
+        //     }
+        //     MaybePixel::None => {}
+        // }
         *p = pixel.clone();
         // emit pixel update to all clients
         self.websockets.retain(|ws| !ws.closed);

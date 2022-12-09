@@ -167,10 +167,11 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                             if now < self.timeouts.paint {
                                 ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Pixel(self.timeouts.paint - now))).unwrap());
                             } else if self.user.is_some() {
-                                self.timeouts.paint = now + CONFIG.timeouts.paint;
                                 let r = self.place.lock().unwrap().update_pixel(&pixel.into_full(self.id.clone()));
                                 match r {
-                                    Ok(_) => {}
+                                    Ok(_) => {
+                                        self.timeouts.paint = now + CONFIG.timeouts.paint;
+                                    }
                                     Err(e) => {
                                         ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
                                     }
