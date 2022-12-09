@@ -35,7 +35,7 @@ async fn main() -> std::io::Result<()> {
         let mappy: HashMap<String, Arc<Mutex<Timeouts>>> = HashMap::new();
         App::new()
             .app_data(web::Data::new(place_clone.clone()))
-            .app_data(web::Data::new(mappy))
+            .app_data(web::Data::new(Arc::new(Mutex::new(mappy))))
             .route("/ws/", web::get().to(ws))
     })
     .bind((CONFIG.host.clone(), CONFIG.port))?
@@ -72,12 +72,18 @@ async fn get_gzip_place() -> Result<Arc<Mutex<MetaPlace>>, Error> {
     Ok(Arc::new(Mutex::new(MetaPlace::new(Box::new(interfaces::GzipInterface::new(path))).await?)))
 }
 
-async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<MetaPlace>>>, timeouts: web::Data<HashMap<String, Arc<Mutex<Timeouts>>>>) -> Result<HttpResponse, actix_web::Error> {
+async fn ws(
+    req: HttpRequest,
+    stream: web::Payload,
+    data: web::Data<Arc<Mutex<MetaPlace>>>,
+    timeouts: web::Data<Arc<Mutex<HashMap<String, Arc<Mutex<Timeouts>>>>>>,
+) -> Result<HttpResponse, actix_web::Error> {
     let place = data.get_ref().clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let id = hash(req.peer_addr().unwrap().ip().to_string());
     let user = place.lock().unwrap().add_websocket(id.clone(), tx);
-    let mut tits = timeouts.get_ref().clone();
+    let titties = timeouts.get_ref().clone();
+    let mut tits = titties.lock().unwrap();
     let timeouts = if let Some(t) = tits.get(&id) {
         t.clone()
     } else {
