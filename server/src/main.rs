@@ -1,4 +1,5 @@
 #![allow(clippy::await_holding_lock)]
+#![feature(map_try_insert)]
 use actix::{ActorContext, AsyncContext, ContextFutureSpawner, Handler, Message, StreamHandler, WrapFuture};
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
 use actix_web_actors::{
@@ -11,7 +12,7 @@ use interfaces::PostgresConfig;
 use lazy_static::lazy_static;
 use place_rs_shared::messages::{TimeoutType, ToServerMsg};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::error::TryRecvError;
 mod config;
 mod interfaces;
@@ -30,11 +31,17 @@ async fn main() -> std::io::Result<()> {
     println!("Starting server on {}:{}", CONFIG.host, CONFIG.port);
     let place_clone = place.clone();
     /*let x = */
-    HttpServer::new(move || App::new().app_data(web::Data::new(place_clone.clone())).route("/ws/", web::get().to(ws)))
-        .bind((CONFIG.host.clone(), CONFIG.port))?
-        .run()
-        .await
-        .expect("Failed to start server");
+    HttpServer::new(move || {
+        let mappy: HashMap<String, Timeouts> = HashMap::new();
+        App::new()
+            .app_data(web::Data::new(place_clone.clone()))
+            .app_data(web::Data::new(Arc::new(Mutex::new(mappy))))
+            .route("/ws/", web::get().to(ws))
+    })
+    .bind((CONFIG.host.clone(), CONFIG.port))?
+    .run()
+    .await
+    .expect("Failed to start server");
 
     place.lock().unwrap().save().await.unwrap();
     Ok(())
@@ -65,18 +72,20 @@ async fn get_gzip_place() -> Result<Arc<Mutex<MetaPlace>>, Error> {
     Ok(Arc::new(Mutex::new(MetaPlace::new(Box::new(interfaces::GzipInterface::new(path))).await?)))
 }
 
-async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<MetaPlace>>>) -> Result<HttpResponse, actix_web::Error> {
+async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<MetaPlace>>>, timeouts: web::Data<Arc<Mutex<HashMap<String, Timeouts>>>>) -> Result<HttpResponse, actix_web::Error> {
     let place = data.get_ref().clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let id = hash(req.peer_addr().unwrap().ip().to_string());
     let user = place.lock().unwrap().add_websocket(id.clone(), tx);
+    let timeouts = timeouts.get_ref().clone();
+    let _ = timeouts.lock().unwrap().try_insert(id.clone(), Timeouts::default());
     let myws = WsConnection {
         place,
         rx: Some(rx),
         user,
         id,
         sent_heartbeats: 0,
-        timeouts: Timeouts::default(),
+        timeouts,
         place_requested: false,
     };
     ws::start(myws, &req, stream)
@@ -95,7 +104,7 @@ struct WsConnection {
     id: String,
     user: Option<User>,
     sent_heartbeats: u32,
-    timeouts: Timeouts,
+    timeouts: Arc<Mutex<HashMap<String, Timeouts>>>,
     place_requested: bool,
 }
 
@@ -127,6 +136,8 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
         match msg {
             Ok(ws::Message::Text(text)) => {
                 let msg = serde_json::from_str::<ToServerMsg>(&text);
+                let mut t = self.timeouts.lock().unwrap();
+                let timeouts = t.get_mut(&self.id).unwrap();
                 match msg {
                     Ok(msg) => match msg {
                         ToServerMsg::Heartbeat => {
@@ -137,10 +148,10 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                             }
                         }
                         ToServerMsg::SetName(name) => {
-                            if now < self.timeouts.username {
-                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Username(self.timeouts.username - now))).unwrap());
+                            if now < timeouts.username {
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Username(timeouts.username - now))).unwrap());
                             } else {
-                                self.timeouts.username = now + CONFIG.timeouts.username;
+                                timeouts.username = now + CONFIG.timeouts.username;
                                 if let Some(user) = &self.user {
                                     let r = self.place.lock().unwrap().update_username(&user.id, &name);
                                     match r {
@@ -164,13 +175,13 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                             }
                         }
                         ToServerMsg::SetPixel(pixel) => {
-                            if now < self.timeouts.paint {
-                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Pixel(self.timeouts.paint - now))).unwrap());
+                            if now < timeouts.paint {
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Pixel(timeouts.paint - now))).unwrap());
                             } else if self.user.is_some() {
                                 let r = self.place.lock().unwrap().update_pixel(&pixel.into_full(self.id.clone()));
                                 match r {
                                     Ok(_) => {
-                                        self.timeouts.paint = now + CONFIG.timeouts.paint;
+                                        timeouts.paint = now + CONFIG.timeouts.paint;
                                     }
                                     Err(e) => {
                                         ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());

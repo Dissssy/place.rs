@@ -34,14 +34,23 @@ async fn main() {
                 }
             }
             Some(Ok(x)) = lines.next() => {
-                let args = x.split_whitespace().map(|x| x.to_string()).collect::<Vec<String>>();
-                let wscommand = ToServerMsg::parse(args);
-                match wscommand {
-                    Ok(command) => {
-                        ws.send(command).await.unwrap();
-                    }
-                    Err(e) => {
-                        println!("Error: {}", e);
+                if x == "help" {
+                    println!("Available commands:");
+                    println!("help - show this message");
+                    println!("setpixel <x> <y> <r> <g> <b> - set pixel at <x>, <y> to color <r>, <g>, <b>");
+                    println!("setname <name> - set your name to <name>");
+                    println!("heartbeat - send a heartbeat to the server");
+                    println!("requestplace - crash the program after like 3 seconds because the server sends back a fucking Vec<u8> that floods the terminal :)")
+                } else {
+                    let args = x.split_whitespace().map(|x| x.to_string()).collect::<Vec<String>>();
+                    let wscommand = ToServerMsg::parse(args);
+                    match wscommand {
+                        Ok(command) => {
+                            ws.send(command).await.unwrap();
+                        }
+                        Err(e) => {
+                            println!("Error: {}", e);
+                        }
                     }
                 }
             }
