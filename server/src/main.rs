@@ -1,23 +1,16 @@
 #![allow(clippy::await_holding_lock)]
-use actix::ActorContext;
-use actix::AsyncContext;
-use actix::ContextFutureSpawner;
-use actix::Handler;
-use actix::Message;
-use actix::StreamHandler;
-use actix::WrapFuture;
+use actix::{ActorContext, AsyncContext, ContextFutureSpawner, Handler, Message, StreamHandler, WrapFuture};
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
-use actix_web_actors::ws;
-use actix_web_actors::ws::CloseCode;
-use actix_web_actors::ws::CloseReason;
+use actix_web_actors::{
+    ws,
+    ws::{CloseCode, CloseReason},
+};
 use anyhow::Error;
 use config::Timeouts;
 use interfaces::PostgresConfig;
 use lazy_static::lazy_static;
-use place_rs_shared::messages::TimeoutType;
-use place_rs_shared::messages::ToServerMsg;
-use sha2::Digest;
-use sha2::Sha256;
+use place_rs_shared::messages::{TimeoutType, ToServerMsg};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::mpsc::error::TryRecvError;
 mod config;
@@ -145,7 +138,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                         }
                         ToServerMsg::SetName(name) => {
                             if now < self.timeouts.username {
-                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Username(CONFIG.timeouts.username))).unwrap());
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Username(now - self.timeouts.username))).unwrap());
                             } else {
                                 self.timeouts.username = now + CONFIG.timeouts.username;
                                 if let Some(user) = &self.user {
@@ -172,7 +165,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                         }
                         ToServerMsg::SetPixel(pixel) => {
                             if now < self.timeouts.paint {
-                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Pixel(CONFIG.timeouts.paint))).unwrap());
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Pixel(now - self.timeouts.paint))).unwrap());
                             } else if self.user.is_some() {
                                 self.timeouts.paint = now + CONFIG.timeouts.paint;
                                 let r = self.place.lock().unwrap().update_pixel(&pixel.into_full(self.id.clone()));

@@ -15,7 +15,7 @@ impl Config {
         let cfg = Self::try_load()?;
         let mut changed = false;
         let cfg = Config {
-            https: {
+            https: cfg.https.unwrap_or_else(|| {
                 // ask for https y/n
                 let mut https = String::new();
                 loop {
@@ -43,7 +43,7 @@ impl Config {
                         _ => println!("Invalid input"),
                     }
                 }
-            },
+            }),
             url: cfg.url.unwrap_or_else(|| {
                 changed = true;
                 safe_get_from_terminal("url")
