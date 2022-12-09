@@ -82,6 +82,7 @@ async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<Me
         t.clone()
     } else {
         println!("Timeouts not found for {}", id);
+        println!("Timeouts: {:?}", tits.keys());
         let t = Arc::new(Mutex::new(Timeouts::default()));
         tits.insert(id.clone(), t.clone());
         t
