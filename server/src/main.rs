@@ -30,7 +30,7 @@ async fn main() -> std::io::Result<()> {
     let place = get_server_place().await.unwrap();
     println!("Starting server on {}:{}", CONFIG.host, CONFIG.port);
     let place_clone = place.clone();
-    let mappy: Arc<Mutex<HashMap<String, Arc<Mutex<Timeouts>>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let mappy: Arc<Mutex<MetaTimeouts>> = Arc::new(Mutex::new(MetaTimeouts::default()));
     let mappy_clone = mappy.clone();
     /*let x = */
     HttpServer::new(move || {
@@ -73,25 +73,25 @@ async fn get_gzip_place() -> Result<Arc<Mutex<MetaPlace>>, Error> {
     Ok(Arc::new(Mutex::new(MetaPlace::new(Box::new(interfaces::GzipInterface::new(path))).await?)))
 }
 
-async fn ws(
-    req: HttpRequest,
-    stream: web::Payload,
-    data: web::Data<Arc<Mutex<MetaPlace>>>,
-    timeouts: web::Data<Arc<Mutex<HashMap<String, Arc<Mutex<Timeouts>>>>>>,
-) -> Result<HttpResponse, actix_web::Error> {
+#[derive(Debug, Clone, Default)]
+pub struct MetaTimeouts {
+    timeouts: HashMap<String, Arc<Mutex<Timeouts>>>,
+}
+
+async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<MetaPlace>>>, timeouts: web::Data<Arc<Mutex<MetaTimeouts>>>) -> Result<HttpResponse, actix_web::Error> {
     let place = data.get_ref().clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let id = hash(req.peer_addr().unwrap().ip().to_string());
     let user = place.lock().unwrap().add_websocket(id.clone(), tx);
     let titties = timeouts.get_ref().clone();
     let mut tits = titties.lock().unwrap();
-    let timeouts = if let Some(t) = tits.get(&id) {
+    let timeouts = if let Some(t) = tits.timeouts.get(&id) {
         t.clone()
     } else {
         // println!("Timeouts not found for {}", id);
         // println!("Timeouts: {:?}", tits.keys());
         let t = Arc::new(Mutex::new(Timeouts::default()));
-        tits.insert(id.clone(), t.clone());
+        tits.timeouts.insert(id.clone(), t.clone());
         t
     };
     let myws = WsConnection {
