@@ -22,7 +22,16 @@ async fn main() {
     loop {
         tokio::select! {
             m = ws.recv() => {
-                println!("Received: {:?}", m);
+                match m {
+                    Some(msg) => {
+                        println!("Received: {:?}", msg);
+                    }
+                    None => {
+                        println!("Disconnected");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        ws = websocket::Websocket::new(CONFIG.get_ws_url());
+                    }
+                }
             }
             Some(Ok(x)) = lines.next() => {
                 let args = x.split_whitespace().map(|x| x.to_string()).collect::<Vec<String>>();

@@ -138,7 +138,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                         }
                         ToServerMsg::SetName(name) => {
                             if now < self.timeouts.username {
-                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Username(now - self.timeouts.username))).unwrap());
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Username(self.timeouts.username - now))).unwrap());
                             } else {
                                 self.timeouts.username = now + CONFIG.timeouts.username;
                                 if let Some(user) = &self.user {
@@ -165,7 +165,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                         }
                         ToServerMsg::SetPixel(pixel) => {
                             if now < self.timeouts.paint {
-                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Pixel(now - self.timeouts.paint))).unwrap());
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Pixel(self.timeouts.paint - now))).unwrap());
                             } else if self.user.is_some() {
                                 self.timeouts.paint = now + CONFIG.timeouts.paint;
                                 let r = self.place.lock().unwrap().update_pixel(&pixel.into_full(self.id.clone()));
