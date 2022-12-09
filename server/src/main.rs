@@ -88,8 +88,8 @@ async fn ws(
     let timeouts = if let Some(t) = tits.get(&id) {
         t.clone()
     } else {
-        println!("Timeouts not found for {}", id);
-        println!("Timeouts: {:?}", tits.keys());
+        // println!("Timeouts not found for {}", id);
+        // println!("Timeouts: {:?}", tits.keys());
         let t = Arc::new(Mutex::new(Timeouts::default()));
         tits.insert(id.clone(), t.clone());
         t
