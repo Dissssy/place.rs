@@ -30,12 +30,13 @@ async fn main() -> std::io::Result<()> {
     let place = get_server_place().await.unwrap();
     println!("Starting server on {}:{}", CONFIG.host, CONFIG.port);
     let place_clone = place.clone();
+    let mappy: Arc<Mutex<HashMap<String, Arc<Mutex<Timeouts>>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let mappy_clone = mappy.clone();
     /*let x = */
     HttpServer::new(move || {
-        let mappy: HashMap<String, Arc<Mutex<Timeouts>>> = HashMap::new();
         App::new()
             .app_data(web::Data::new(place_clone.clone()))
-            .app_data(web::Data::new(Arc::new(Mutex::new(mappy))))
+            .app_data(web::Data::new(mappy_clone.clone()))
             .route("/ws/", web::get().to(ws))
     })
     .bind((CONFIG.host.clone(), CONFIG.port))?
