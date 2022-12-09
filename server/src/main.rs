@@ -32,10 +32,10 @@ async fn main() -> std::io::Result<()> {
     let place_clone = place.clone();
     /*let x = */
     HttpServer::new(move || {
-        let mappy: HashMap<String, Timeouts> = HashMap::new();
+        let mappy: HashMap<String, Arc<Mutex<Timeouts>>> = HashMap::new();
         App::new()
             .app_data(web::Data::new(place_clone.clone()))
-            .app_data(web::Data::new(Arc::new(Mutex::new(mappy))))
+            .app_data(web::Data::new(mappy))
             .route("/ws/", web::get().to(ws))
     })
     .bind((CONFIG.host.clone(), CONFIG.port))?
@@ -72,13 +72,19 @@ async fn get_gzip_place() -> Result<Arc<Mutex<MetaPlace>>, Error> {
     Ok(Arc::new(Mutex::new(MetaPlace::new(Box::new(interfaces::GzipInterface::new(path))).await?)))
 }
 
-async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<MetaPlace>>>, timeouts: web::Data<Arc<Mutex<HashMap<String, Timeouts>>>>) -> Result<HttpResponse, actix_web::Error> {
+async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<MetaPlace>>>, timeouts: web::Data<HashMap<String, Arc<Mutex<Timeouts>>>>) -> Result<HttpResponse, actix_web::Error> {
     let place = data.get_ref().clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let id = hash(req.peer_addr().unwrap().ip().to_string());
     let user = place.lock().unwrap().add_websocket(id.clone(), tx);
-    let timeouts = timeouts.get_ref().clone();
-    let _ = timeouts.lock().unwrap().try_insert(id.clone(), Timeouts::default());
+    let mut tits = timeouts.get_ref().clone();
+    let timeouts = if let Some(t) = tits.get(&id) {
+        t.clone()
+    } else {
+        let t = Arc::new(Mutex::new(Timeouts::default()));
+        tits.insert(id.clone(), t.clone());
+        t
+    };
     let myws = WsConnection {
         place,
         rx: Some(rx),
@@ -104,7 +110,7 @@ struct WsConnection {
     id: String,
     user: Option<User>,
     sent_heartbeats: u32,
-    timeouts: Arc<Mutex<HashMap<String, Timeouts>>>,
+    timeouts: Arc<Mutex<Timeouts>>,
     place_requested: bool,
 }
 
@@ -136,8 +142,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
         match msg {
             Ok(ws::Message::Text(text)) => {
                 let msg = serde_json::from_str::<ToServerMsg>(&text);
-                let mut t = self.timeouts.lock().unwrap();
-                let timeouts = t.get_mut(&self.id).unwrap();
+                let mut timeouts = self.timeouts.lock().unwrap();
                 match msg {
                     Ok(msg) => match msg {
                         ToServerMsg::Heartbeat => {
