@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
-use anyhow::Error;
+use anyhow::{anyhow, Error};
+use async_std::stream::StreamExt;
+use eframe::epaint::ColorImage;
+use egui_extras::RetainedImage;
 use futures_util::stream::FuturesUnordered;
-use futures_util::TryStreamExt;
-use place_rs_shared::messages::ToClientMsg;
+use place_rs_shared::messages::{SafeInfo, ToClientMsg};
 use place_rs_shared::{hash, messages::ToServerMsg, Color, GenericPixelWithLocation, Place as RawPlace, XY};
+use place_rs_shared::{ChatMsg, MaybePixel, User};
+use poll_promise::Promise;
 use tokio::sync::oneshot::Receiver;
-use tokio::{io::AsyncWriteExt, sync::Mutex};
+use tokio::sync::Mutex;
 
 use crate::websocket::{Callback, Websocket, RX};
 
@@ -18,6 +22,7 @@ pub struct Place {
     nonce: u64,
     callback_handler: CallbackHandler,
     changed: Arc<Mutex<bool>>,
+    chat_rx: tokio::sync::mpsc::UnboundedReceiver<VerifiedChatMsg>,
 }
 
 impl Place {
@@ -27,16 +32,18 @@ impl Place {
         let place = websocket.get_place().await?;
         let place = Arc::new(Mutex::new(place));
         let cplace = place.clone();
-        let changed = Arc::new(Mutex::new(false));
+        let changed = Arc::new(Mutex::new(true));
         let cchanged = changed.clone();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             place,
             websocket,
             rest_url,
             ws_url,
             nonce: 0,
-            callback_handler: CallbackHandler::new(events, cplace, cchanged).await,
+            callback_handler: CallbackHandler::new(events, cplace, cchanged, tx).await,
             changed,
+            chat_rx: rx,
         })
     }
     pub async fn paint(&mut self, location: XY, color: Color) -> Result<(), Error> {
@@ -61,7 +68,7 @@ impl Place {
         Ok(())
     }
     pub async fn export_img(&self) -> Result<(), Error> {
-        let mut path = dirs::desktop_dir().ok_or_else(|| Error::msg("Failed to get desktop path"))?;
+        let mut path = dirs::download_dir().ok_or_else(|| Error::msg("Failed to get download path"))?;
         path.push("place.png");
         let r = self.place.lock().await.get_img(path).await;
         if let Err(e) = r {
@@ -69,11 +76,67 @@ impl Place {
         }
         Ok(())
     }
-    pub async fn changed(&self) -> bool {
-        let mut changed = self.changed.lock().await;
-        let r = *changed;
+    pub fn changed(&self) -> bool {
+        let changed = self.changed.try_lock();
+        match changed {
+            Ok(mut changed) => {
+                let r = *changed;
+                *changed = false;
+                r
+            }
+            Err(_) => false,
+        }
+    }
+    pub fn try_get_msg(&mut self) -> Option<VerifiedChatMsg> {
+        self.chat_rx.try_recv().ok()
+    }
+    pub async fn get_image(place: Arc<Mutex<RawPlace>>, changed: Arc<Mutex<bool>>) -> Result<RetainedImage, Error> {
+        let image = {
+            let place = place.lock().await;
+            place.data.clone()
+        }
+        .iter()
+        .map(|p| {
+            p.iter()
+                .map(|u| match u.pixel.clone() {
+                    MaybePixel::None => Color::default(),
+                    MaybePixel::Pixel(x) => x.color,
+                })
+                .collect::<Vec<Color>>()
+        })
+        .collect::<Vec<Vec<Color>>>();
+        let size = [image.len(), image.get(0).ok_or_else(|| anyhow!("Empty image"))?.len()];
+        // now we have a 2d array of colors
+        // we need to make it into a 2d array of u8s
+        let image = image
+            .iter()
+            .flat_map(|row| {
+                row.iter()
+                    .flat_map(|color| {
+                        let color = vec![color.r, color.g, color.b, 255u8];
+                        color
+                    })
+                    .collect::<Vec<u8>>()
+            })
+            .collect::<Vec<u8>>();
+
+        let image = ColorImage::from_rgba_unmultiplied(size, &image[..]);
+        let mut changed = changed.lock().await;
         *changed = false;
-        r
+        Ok(RetainedImage::from_color_image("Place", image))
+    }
+    pub fn get_image_promise(&self) -> Promise<Result<RetainedImage, Error>> {
+        Promise::spawn_async(Self::get_image(self.place.clone(), self.changed.clone()))
+    }
+    pub async fn get_image_async(&self) -> Result<RetainedImage, Error> {
+        Self::get_image(self.place.clone(), self.changed.clone()).await
+    }
+    pub async fn get_info(&self) -> Result<SafeInfo, Error> {
+        // get SafeInfo from the /info REST endpoint
+        let url = format!("{}/info", self.rest_url);
+        let resp = reqwest::get(&url).await?;
+        let info: SafeInfo = resp.json().await?;
+        Ok(info)
     }
 }
 
@@ -82,10 +145,15 @@ struct CallbackHandler {
     sender: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Receiver<Result<Callback, Error>>>,
 }
 
+pub struct VerifiedChatMsg {
+    pub msg: String,
+    pub user: User,
+}
+
 impl CallbackHandler {
-    pub async fn new(events: tokio::sync::mpsc::Receiver<RX>, place: Arc<Mutex<RawPlace>>, changed: Arc<Mutex<bool>>) -> Self {
+    pub async fn new(events: tokio::sync::mpsc::Receiver<RX>, place: Arc<Mutex<RawPlace>>, changed: Arc<Mutex<bool>>, chat_messages: tokio::sync::mpsc::UnboundedSender<VerifiedChatMsg>) -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let handle = tokio::spawn(Self::handle_events(events, rx, place, changed));
+        let handle = tokio::spawn(Self::handle_events(events, rx, place, changed, chat_messages));
         Self { handle, sender: tx }
     }
     async fn handle_events(
@@ -93,28 +161,65 @@ impl CallbackHandler {
         mut rx: tokio::sync::mpsc::UnboundedReceiver<tokio::sync::oneshot::Receiver<Result<Callback, Error>>>,
         place: Arc<Mutex<RawPlace>>,
         changed: Arc<Mutex<bool>>,
+        chat_messages: tokio::sync::mpsc::UnboundedSender<VerifiedChatMsg>,
     ) {
         let mut futures: FuturesUnordered<Receiver<Result<Callback, Error>>> = FuturesUnordered::new();
         loop {
+            // println!("Waiting for events");
             tokio::select! {
-                r = futures.try_next() => {
+                Some(r) = futures.next() => {
                         match r {
                             Err(e) => {
                                 println!("Error: {}", e);
                             }
-                            Ok(None) => {}
-                            Ok(Some(Ok(x))) => {
+                            Ok(Ok(x)) => {
                                 // println!("Promise resolved");
                                 match x {
-                                    Callback::Message(_, RX::Message(ToClientMsg::ChatMsg(_, msg))) => {
-                                        println!("{}\t: {}", msg.user_id, msg.msg);
+                                    Callback::Message(_, RX::Message(msg)) => {
+                                        match msg {
+                                            ToClientMsg::ChatMsg(_, msg) => {
+                                                let user = place.lock().await.get_user(msg.user_id.clone());
+                                                if let Some(user) = user {
+                                                    let r = chat_messages.send(VerifiedChatMsg { msg: msg.msg, user });
+                                                    if let Err(e) = r {
+                                                        println!("Failed to send chat message: {}", e);
+                                                    }
+                                                } else {
+                                                    // println!("{}: {}", msg.user_id, msg.msg);
+                                                    println!("User not found: {}", msg.user_id);
+                                                }
+                                            }
+                                            ToClientMsg::PixelUpdate(_, p) => {
+                                                let mut place = place.lock().await;
+                                                let r = place.set_pixel(p);
+                                                if let Err(e) = r {
+                                                    println!("Failed to set pixel: {}", e);
+                                                } else {
+                                                    let mut changed = changed.lock().await;
+                                                    *changed = true;
+                                                }
+                                            }
+                                            ToClientMsg::UserUpdate(_, u) => {
+                                                let mut place = place.lock().await;
+                                                let r = place.set_user(u);
+                                                if let Err(e) = r {
+                                                    println!("Failed to set user: {}", e);
+                                                } else {
+                                                    let mut changed = changed.lock().await;
+                                                    *changed = true;
+                                                }
+                                            }
+                                            _ => {
+                                                // println!("Unhandled message: {:?}", msg);
+                                            }
+                                        }
                                     }
                                     _ => {
-                                        println!("Received message: {:?}", x);
+                                        println!("Unhandled message: {:?}", x);
                                     }
                                 }
                             }
-                            Ok(Some(Err(e))) => {
+                            Ok(Err(e)) => {
                                 println!("Websocket error: {}", e);
                             }
                         }
@@ -125,7 +230,7 @@ impl CallbackHandler {
                             match x {
                                 RX::Message(msg) => {
                                     match msg {
-                                        place_rs_shared::messages::ToClientMsg::PixelUpdate(_, p) => {
+                                        ToClientMsg::PixelUpdate(_, p) => {
                                             let mut place = place.lock().await;
                                             let r = place.set_pixel(p);
                                             if let Err(e) = r {
@@ -135,26 +240,30 @@ impl CallbackHandler {
                                                 *changed = true;
                                             }
                                         },
-                                        place_rs_shared::messages::ToClientMsg::UserUpdate(_, u) => {
+                                        ToClientMsg::UserUpdate(_, u) => {
                                             let mut place = place.lock().await;
                                             let r = place.set_user(u);
                                             if let Err(e) = r {
                                                 println!("Failed to set user: {}", e);
                                             }
                                         },
-                                        place_rs_shared::messages::ToClientMsg::Heartbeat(_) => {},
-                                        place_rs_shared::messages::ToClientMsg::GenericError(_, e) => {
+                                        ToClientMsg::Heartbeat(_) => {},
+                                        ToClientMsg::GenericError(_, e) => {
                                             println!("Received error: {}", e);
                                         },
-                                        place_rs_shared::messages::ToClientMsg::TimeoutError(_, e) => {
+                                        ToClientMsg::TimeoutError(_, e) => {
                                             println!("Received timeout error: {:?}", e);
                                         },
-                                        place_rs_shared::messages::ToClientMsg::ChatMsg(_, msg) => {
+                                        ToClientMsg::ChatMsg(_, msg) => {
                                             let user = place.lock().await.get_user(msg.user_id.clone());
                                             if let Some(user) = user {
-                                                println!("{}: {}", user.name, msg.msg);
+                                                let r = chat_messages.send(VerifiedChatMsg { msg: msg.msg, user });
+                                                if let Err(e) = r {
+                                                    println!("Failed to send chat message: {}", e);
+                                                }
                                             } else {
-                                                println!("{}: {}", msg.user_id, msg.msg);
+                                                // println!("{}: {}", msg.user_id, msg.msg);
+                                                println!("User not found: {}", msg.user_id);
                                             }
                                         },
                                     }
@@ -181,6 +290,7 @@ impl CallbackHandler {
                     }
                 }
             }
+            // tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
     }
     pub async fn send_callback(&mut self, callback: tokio::sync::oneshot::Receiver<Result<Callback, Error>>) -> Result<(), Error> {

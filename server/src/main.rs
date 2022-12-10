@@ -1,7 +1,7 @@
 #![allow(clippy::await_holding_lock)]
 #![feature(map_try_insert)]
 use actix::{ActorContext, AsyncContext, ContextFutureSpawner, Handler, Message, StreamHandler, WrapFuture};
-use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
+use actix_web::{get, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_web_actors::{
     ws,
     ws::{CloseCode, CloseReason},
@@ -12,7 +12,7 @@ use interfaces::PostgresConfig;
 use lazy_static::lazy_static;
 use place_rs_shared::{
     hash,
-    messages::{TimeoutType, ToServerMsg},
+    messages::{SafeInfo, TimeoutType, ToServerMsg},
     ChatMsg,
 };
 use std::{collections::HashMap, sync::Arc};
@@ -28,6 +28,12 @@ lazy_static! {
     static ref CONFIG: Config = Config::new().unwrap();
 }
 
+#[get("/info")]
+async fn information() -> impl Responder {
+    let info = SafeInfo::new(CONFIG.size);
+    web::Json(info)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let place = get_server_place().await.unwrap();
@@ -40,6 +46,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(place_clone.clone()))
             .app_data(web::Data::new(mappy_clone.clone()))
+            .service(information)
             .route("/ws/", web::get().to(ws))
     })
     .bind((CONFIG.host.clone(), CONFIG.port))?

@@ -57,3 +57,15 @@ impl ToServerMsg {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+
+pub struct SafeInfo {
+    pub size: XY,
+}
+
+impl SafeInfo {
+    pub fn new(size: XY) -> Self {
+        Self { size }
+    }
+}

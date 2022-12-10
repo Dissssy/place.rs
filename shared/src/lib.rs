@@ -86,6 +86,7 @@ impl Place {
         Ok(())
     }
     pub fn get_user(&self, id: String) -> Option<User> {
+        // println!("Users: {:?}", self.users);
         self.users.get(&id).cloned()
     }
 }
