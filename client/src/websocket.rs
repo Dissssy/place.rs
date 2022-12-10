@@ -3,7 +3,7 @@ use anyhow::{anyhow, Error};
 use async_std::stream::StreamExt;
 use futures_util::SinkExt;
 use place_rs_shared::messages::{TimeoutType, ToClientMsg, ToServerMsg};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, f32::consts::E, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
@@ -35,7 +35,7 @@ enum TX {
     Close,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RX {
     Message(ToClientMsg),
     Binary(Vec<u8>),
@@ -57,6 +57,13 @@ impl Websocket {
                 Ok(websocket) => websocket,
                 Err(e) => {
                     // let _ = rtx.send(RX::GenericError(format!("Failed to connect: {}", e)));
+                    if let Err(e) = callbacks
+                        .lock()
+                        .await
+                        .fulfill("connect".to_string(), Callback::GenericError("connect".to_string(), format!("Failed to connect: {}", e)))
+                    {
+                        println!("Failed to fulfill connect callback: {}", e);
+                    }
                     sstate.lock().await.set(WebsocketState::Disconnected("Failed to connect".to_string()));
                     return;
                 }
@@ -71,11 +78,14 @@ impl Websocket {
                             (nonce, TX::Message(msg)) => {
                                 if let Err(e) = websocket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&msg).unwrap())).await {
                                     // let _ = rtx.send(RX::GenericError(format!("Failed to send message: {}", e)));
+                                    if let Err(e) = callbacks.lock().await.fulfill(nonce.clone(), Callback::Message(nonce.clone(), RX::GenericError(format!("Failed to send message: {}", e)))) {
+                                        println!("Failed to fulfill message callback: {}", e);
+                                    }
                                     sstate.lock().await.set(WebsocketState::Disconnected("Failed to send message".to_string()));
                                     break;
                                 }
                             }
-                            (nonce, TX::Close) => {
+                            (_nonce, TX::Close) => {
                                 break;
                             }
                         }
@@ -94,13 +104,12 @@ impl Websocket {
                                                 }
                                                 let _ = websocket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&ToServerMsg::Heartbeat("UwU".to_string())).unwrap())).await;
                                             },
-                                            ToClientMsg::GenericError(nonce, e) => {
-                                                if let Some(nonce) = nonce {
-                                                    let _ = callbacks.lock().await.fulfill(nonce.clone(), Callback::GenericError(nonce, e.clone()));
-                                                }
+                                            ToClientMsg::GenericError(Some(nonce), e) => {
+                                                let _ = callbacks.lock().await.fulfill(nonce.clone(), Callback::GenericError(nonce, e.clone()));
                                                 // let _ = rtx.send(RX::GenericError(e));
                                             },
-                                            ToClientMsg::TimeoutError(nonce, e) => {
+                                            ToClientMsg::TimeoutError(Some(nonce), e) => {
+                                                let _ = callbacks.lock().await.fulfill(nonce.clone(), Callback::TimeoutError(nonce, e.clone()));
                                                 // let _ = rtx.send(RX::TimeoutError(e));
                                             },
                                             _ => {
@@ -109,6 +118,9 @@ impl Websocket {
                                         }
                                     },
                                     TMessage::Binary(msg) => {
+                                        if let Err(e) = callbacks.lock().await.fulfill("binary".to_string(), Callback::Binary("binary".to_string(), msg.clone())) {
+                                            println!("Failed to fulfill binary callback: {}", e);
+                                        }
                                         // let _ = rtx.send(RX::Binary(msg));
                                     },
                                     TMessage::Ping(_) => {
@@ -147,6 +159,12 @@ impl Websocket {
     }
 
     pub async fn send(&mut self, msg: ToServerMsg, nonce: String) -> Result<tokio::sync::oneshot::Receiver<Result<Callback, Error>>, Error> {
+        // if msg is RequestPlace then nonce will be "binary"
+        let mut nonce = nonce;
+        if msg == ToServerMsg::RequestPlace(nonce.clone()) {
+            nonce = "binary".to_string();
+        }
+
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Callback, Error>>();
         self.callbacks.lock().await.insert(nonce.clone(), tx)?;
         self.sender.send((nonce, TX::Message(msg)))?;
@@ -187,8 +205,8 @@ impl Websocket {
 pub enum Callback {
     Heartbeat(String),
     GenericError(String, String),
-    TimeoutError(String, String),
-    Message(String, ToClientMsg),
+    TimeoutError(String, TimeoutType),
+    Message(String, RX),
     Binary(String, Vec<u8>),
 }
 
