@@ -71,6 +71,7 @@ impl Config {
                 Timeouts {
                     paint: safe_get_from_terminal("paint timeout (seconds)"),
                     username: safe_get_from_terminal("username timeout (seconds)"),
+                    chat: safe_get_from_terminal("chat timeout (seconds)"),
                 }
             }),
             max_missed_heartbeats: cfg.max_missed_heartbeats.unwrap_or_else(|| {
@@ -128,4 +129,5 @@ pub struct Times {
 pub struct Timeouts {
     pub paint: u64,
     pub username: u64,
+    pub chat: u64,
 }

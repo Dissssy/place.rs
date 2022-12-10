@@ -10,7 +10,10 @@ use anyhow::Error;
 use config::Timeouts;
 use interfaces::PostgresConfig;
 use lazy_static::lazy_static;
-use place_rs_shared::messages::{TimeoutType, ToServerMsg};
+use place_rs_shared::{
+    messages::{TimeoutType, ToServerMsg},
+    ChatMsg,
+};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -140,7 +143,7 @@ impl Handler<Bin> for WsConnection {
                 ctx.binary(bin);
             }
             Err(e) => {
-                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(msg.nonce), e.to_string())).unwrap());
             }
         }
     }
@@ -150,6 +153,7 @@ impl Handler<Bin> for WsConnection {
 #[rtype(result = "()")]
 pub struct Bin {
     bin: Result<Vec<u8>, Error>,
+    nonce: String,
 }
 
 impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
@@ -161,64 +165,64 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                 let mut timeouts = self.timeouts.lock().unwrap();
                 match msg {
                     Ok(msg) => match msg {
-                        ToServerMsg::Heartbeat => {
+                        ToServerMsg::Heartbeat(nonce) => {
                             if self.sent_heartbeats == 0 {
-                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("SHUT THE FUCK UP".to_string())).unwrap());
+                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), "SHUT THE FUCK UP".to_string())).unwrap());
                             } else {
                                 self.sent_heartbeats = 0;
                             }
                         }
-                        ToServerMsg::SetName(name) => {
+                        ToServerMsg::SetName(nonce, name) => {
                             if now < timeouts.username {
-                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Username(timeouts.username - now))).unwrap());
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(Some(nonce), TimeoutType::Username(timeouts.username - now))).unwrap());
                             } else {
                                 timeouts.username = now + CONFIG.timeouts.username;
                                 if let Some(user) = &self.user {
-                                    let r = self.place.lock().unwrap().update_username(&user.id, &name);
+                                    let r = self.place.lock().unwrap().update_username(&user.id, &name, Some(nonce.clone()));
                                     match r {
                                         Ok(_) => {}
                                         Err(e) => {
-                                            ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                                            ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), e.to_string())).unwrap());
                                         }
                                     }
                                 } else {
                                     let user = User { id: self.id.clone(), name };
-                                    let r = self.place.lock().unwrap().add_user(user.clone());
+                                    let r = self.place.lock().unwrap().add_user(user.clone(), Some(nonce.clone()));
                                     match r {
                                         Ok(_) => {
                                             self.user = Some(user);
                                         }
                                         Err(e) => {
-                                            ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                                            ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), e.to_string())).unwrap());
                                         }
                                     }
                                 }
                             }
                         }
-                        ToServerMsg::SetPixel(pixel) => {
+                        ToServerMsg::SetPixel(nonce, pixel) => {
                             if now < timeouts.paint {
-                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(TimeoutType::Pixel(timeouts.paint - now))).unwrap());
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(Some(nonce), TimeoutType::Pixel(timeouts.paint - now))).unwrap());
                             } else if self.user.is_some() {
-                                let r = self.place.lock().unwrap().update_pixel(&pixel.into_full(self.id.clone()));
+                                let r = self.place.lock().unwrap().update_pixel(&pixel.into_full(self.id.clone()), Some(nonce.clone()));
                                 match r {
                                     Ok(_) => {
                                         timeouts.paint = now + CONFIG.timeouts.paint;
                                     }
                                     Err(e) => {
-                                        ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                                        ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), e.to_string())).unwrap());
                                     }
                                 }
                             } else {
-                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("You must set a username before painting".to_string())).unwrap());
+                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), "You must set a username before painting".to_string())).unwrap());
                             }
                         }
-                        ToServerMsg::RequestPlace => {
+                        ToServerMsg::RequestPlace(nonce) => {
                             // client is requesting a gzipped place, this operation is very expensive so we only allow it once per connection
                             if !self.place_requested {
                                 let place = self.place.lock().unwrap();
                                 let p = place.place.clone();
                                 let recipient = ctx.address().recipient();
-                                let future = async move { recipient.do_send(Bin { bin: p.gun_zip().await }) };
+                                let future = async move { recipient.do_send(Bin { nonce, bin: p.gun_zip().await }) };
                                 future.into_actor(self).spawn(ctx);
                                 // let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>, Error>>();
                                 // let h = ctx.spawn(wrap_future(async move {
@@ -241,11 +245,34 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                                 //     std::thread::sleep(std::time::Duration::from_millis(100));
                                 // }
                             } else {
-                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("You have already requested the place".to_string())).unwrap());
+                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), "You have already requested the place".to_string())).unwrap());
+                            }
+                        }
+                        ToServerMsg::ChatMsg(nonce, message) => {
+                            // ensure the user has a name set, and that they are not spamming
+                            if now < timeouts.chat {
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(Some(nonce), TimeoutType::Chat(timeouts.chat - now))).unwrap());
+                            } else if let Some(user) = &self.user {
+                                timeouts.chat = now + CONFIG.timeouts.chat;
+                                let r = self.place.lock().unwrap().send_chat_msg(
+                                    ChatMsg {
+                                        user_id: user.id.clone(),
+                                        msg: message,
+                                    },
+                                    Some(nonce.clone()),
+                                );
+                                match r {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), e.to_string())).unwrap());
+                                    }
+                                }
+                            } else {
+                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), "You must set a username before chatting".to_string())).unwrap());
                             }
                         }
                     },
-                    Err(e) => ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap()),
+                    Err(e) => ctx.text(serde_json::to_string(&ToClientMsg::GenericError(None, e.to_string())).unwrap()),
                 }
             }
             Ok(ws::Message::Close(reason)) => {
@@ -258,19 +285,19 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                 ctx.pong(&msg);
             }
             Ok(ws::Message::Pong(_)) => {
-                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("Unsupported method Pong".to_string())).unwrap());
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(None, "Unsupported method Pong".to_string())).unwrap());
             }
             Ok(ws::Message::Binary(_)) => {
-                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("Unsupported method Binary".to_string())).unwrap());
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(None, "Unsupported method Binary".to_string())).unwrap());
             }
             Ok(ws::Message::Nop) => {
-                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("Unsupported method Nop".to_string())).unwrap());
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(None, "Unsupported method Nop".to_string())).unwrap());
             }
             Ok(ws::Message::Continuation(_)) => {
-                ctx.text(serde_json::to_string(&ToClientMsg::GenericError("Unsupported method Continuation".to_string())).unwrap());
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(None, "Unsupported method Continuation".to_string())).unwrap());
             }
             Err(e) => {
-                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(e.to_string())).unwrap());
+                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(None, e.to_string())).unwrap());
             }
         }
     }
@@ -288,7 +315,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                         // println!("Message channel disconnected");
                         ctx.close(Some(CloseReason {
                             code: CloseCode::Error,
-                            description: Some(serde_json::to_string(&ToClientMsg::GenericError("Disconnected".to_string())).unwrap()),
+                            description: Some(serde_json::to_string(&ToClientMsg::GenericError(None, "Disconnected".to_string())).unwrap()),
                         }));
                     }
                 },
@@ -296,7 +323,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
         });
         ctx.run_interval(std::time::Duration::from_millis(CONFIG.times.ws_hb_interval), move |act, ctx| {
             if act.sent_heartbeats < CONFIG.max_missed_heartbeats {
-                ctx.text(serde_json::to_string(&ToClientMsg::Heartbeat).unwrap());
+                ctx.text(serde_json::to_string(&ToClientMsg::Heartbeat(None)).unwrap());
                 act.sent_heartbeats += 1;
             } else {
                 // println!("Heartbeat timeout");

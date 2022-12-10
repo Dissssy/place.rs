@@ -164,13 +164,17 @@ impl MetaPlace {
     pub async fn save(&mut self) -> Result<(), Error> {
         self.interface.save_all(&self.place).await
     }
-    pub fn update_username(&mut self, id: &str, name: &str) -> Result<(), Error> {
+    pub fn update_username(&mut self, id: &str, name: &str, nonce: Option<String>) -> Result<(), Error> {
         let user = self.place.users.get_mut(id).ok_or_else(|| anyhow!("No user with id {} found", id))?;
         user.name = name.to_string();
         // emit user update to all clients
         self.websockets.retain(|ws| !ws.closed);
         for ws in self.websockets.iter_mut() {
-            let r = ws.handle.send(ToClientMsg::UserUpdate(user.clone()));
+            let r = if ws.id == user.id {
+                ws.handle.send(ToClientMsg::UserUpdate(nonce.clone(), user.clone()))
+            } else {
+                ws.handle.send(ToClientMsg::UserUpdate(None, user.clone()))
+            };
             if r.is_err() {
                 ws.closed = true;
             }
@@ -178,12 +182,16 @@ impl MetaPlace {
         self.websockets.retain(|ws| !ws.closed);
         Ok(())
     }
-    pub fn add_user(&mut self, user: User) -> Result<(), Error> {
+    pub fn add_user(&mut self, user: User, nonce: Option<String>) -> Result<(), Error> {
         self.place.users.insert(user.id.clone(), user.clone());
         // emit user update to all clients
         self.websockets.retain(|ws| !ws.closed);
         for ws in self.websockets.iter_mut() {
-            let r = ws.handle.send(ToClientMsg::UserUpdate(user.clone()));
+            let r = if ws.id == user.id {
+                ws.handle.send(ToClientMsg::UserUpdate(nonce.clone(), user.clone()))
+            } else {
+                ws.handle.send(ToClientMsg::UserUpdate(None, user.clone()))
+            };
             if r.is_err() {
                 ws.closed = true;
             }
@@ -191,35 +199,59 @@ impl MetaPlace {
         self.websockets.retain(|ws| !ws.closed);
         Ok(())
     }
-    pub fn update_pixel(&mut self, pixel: &PixelWithLocation) -> Result<(), Error> {
-        let row = self
-            .place
-            .data
-            .get_mut(pixel.location.y as usize)
-            .ok_or_else(|| anyhow!("Index {} on y out of bounds", pixel.location.y))?;
-        let p = row.get_mut(pixel.location.x as usize).ok_or_else(|| anyhow!("Index {} on x out of bounds", pixel.location.x))?;
-        if let (MaybePixel::Pixel(j), MaybePixel::Pixel(k)) = (p.pixel.clone(), pixel.pixel.clone()) {
-            if j.color == k.color {
-                return Err(anyhow!("Pixel already has color"));
+    pub fn update_pixel(&mut self, pixel: &PixelWithLocation, nonce: Option<String>) -> Result<(), Error> {
+        if let MaybePixel::Pixel(pnes) = &pixel.pixel {
+            let row = self
+                .place
+                .data
+                .get_mut(pixel.location.y as usize)
+                .ok_or_else(|| anyhow!("Index {} on y out of bounds", pixel.location.y))?;
+            let p = row.get_mut(pixel.location.x as usize).ok_or_else(|| anyhow!("Index {} on x out of bounds", pixel.location.x))?;
+            if let (MaybePixel::Pixel(j), MaybePixel::Pixel(k)) = (p.pixel.clone(), pixel.pixel.clone()) {
+                if j.color == k.color {
+                    return Err(anyhow!("Pixel already has color"));
+                }
             }
+            // match p.pixel.clone() {
+            //     MaybePixel::Pixel(paxel) => {
+            //         match paxel {
+            //             MaybePixel::Pixel(puxel) => {
+            //                 if paxel.color == puxel.color {
+            //                     return Ok(());
+            //                 }
+            //             }
+            //         }
+            //     }
+            //     MaybePixel::None => {}
+            // }
+            *p = pixel.clone();
+            // emit pixel update to all clients
+            self.websockets.retain(|ws| !ws.closed);
+            for ws in self.websockets.iter_mut() {
+                let r = if ws.id == pnes.artist_id {
+                    ws.handle.send(ToClientMsg::PixelUpdate(nonce.clone(), pixel.clone()))
+                } else {
+                    ws.handle.send(ToClientMsg::PixelUpdate(None, pixel.clone()))
+                };
+                if r.is_err() {
+                    ws.closed = true;
+                }
+            }
+            self.websockets.retain(|ws| !ws.closed);
+            Ok(())
+        } else {
+            Err(anyhow!("Pixel is not a pixel"))
         }
-        // match p.pixel.clone() {
-        //     MaybePixel::Pixel(paxel) => {
-        //         match paxel {
-        //             MaybePixel::Pixel(puxel) => {
-        //                 if paxel.color == puxel.color {
-        //                     return Ok(());
-        //                 }
-        //             }
-        //         }
-        //     }
-        //     MaybePixel::None => {}
-        // }
-        *p = pixel.clone();
-        // emit pixel update to all clients
+    }
+    pub fn send_chat_msg(&mut self, msg: ChatMsg, nonce: Option<String>) -> Result<(), Error> {
+        // emit chat msg to all clients
         self.websockets.retain(|ws| !ws.closed);
         for ws in self.websockets.iter_mut() {
-            let r = ws.handle.send(ToClientMsg::PixelUpdate(pixel.clone()));
+            let r = if ws.id == msg.user_id {
+                ws.handle.send(ToClientMsg::ChatMsg(nonce.clone(), msg.clone()))
+            } else {
+                ws.handle.send(ToClientMsg::ChatMsg(None, msg.clone()))
+            };
             if r.is_err() {
                 ws.closed = true;
             }
@@ -227,6 +259,12 @@ impl MetaPlace {
         self.websockets.retain(|ws| !ws.closed);
         Ok(())
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ChatMsg {
+    pub user_id: String,
+    pub msg: String,
 }
 
 pub fn program_path() -> Result<std::path::PathBuf, Error> {
