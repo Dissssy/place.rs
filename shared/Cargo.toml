@@ -19,3 +19,4 @@ async-trait = "0.1.59"
 # async-postgres = "0.5.1"
 sqlx = { version = "0.6.2", features = ["runtime-tokio-rustls", "macros", "chrono", "uuid", "offline", "postgres"] }
 flate2 = "1.0.25"
+sha2 = "0.10.6"

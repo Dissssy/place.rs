@@ -11,10 +11,10 @@ use config::Timeouts;
 use interfaces::PostgresConfig;
 use lazy_static::lazy_static;
 use place_rs_shared::{
+    hash,
     messages::{TimeoutType, ToServerMsg},
     ChatMsg,
 };
-use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::error::TryRecvError;
 mod config;
@@ -114,13 +114,6 @@ async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<Me
         place_requested: false,
     };
     ws::start(myws, &req, stream)
-}
-
-fn hash(s: String) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(s);
-    let result = hasher.finalize();
-    format!("{:x}", result)
 }
 
 struct WsConnection {

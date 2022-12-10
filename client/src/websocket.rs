@@ -2,7 +2,10 @@
 use anyhow::{anyhow, Error};
 use async_std::stream::StreamExt;
 use futures_util::SinkExt;
-use place_rs_shared::messages::{TimeoutType, ToClientMsg, ToServerMsg};
+use place_rs_shared::{
+    messages::{TimeoutType, ToClientMsg, ToServerMsg},
+    Place,
+};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message as TMessage;
@@ -14,6 +17,7 @@ pub struct Websocket {
     // receiver: tokio::sync::mpsc::UnboundedReceiver<RX>,
     state: Arc<Mutex<WebsocketState>>,
     callbacks: Arc<Mutex<CallbackHandler>>,
+    placegotten: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -213,14 +217,15 @@ impl Websocket {
             // receiver: rrx,
             state,
             callbacks,
+            placegotten: false,
         }
     }
     pub async fn send(&mut self, msg: ToServerMsg, nonce: String) -> Result<tokio::sync::oneshot::Receiver<Result<Callback, Error>>, Error> {
         // if msg is RequestPlace then nonce will be "binary"
-        let mut nonce = nonce;
-        if msg == ToServerMsg::RequestPlace(nonce.clone()) {
-            nonce = "binary".to_string();
-        }
+        // let mut nonce = nonce;
+        // if msg == ToServerMsg::RequestPlace(nonce.clone()) {
+        //     nonce = "binary".to_string();
+        // }
 
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<Callback, Error>>();
         self.callbacks.lock().await.insert(nonce.clone(), tx)?;
@@ -256,6 +261,19 @@ impl Websocket {
         }
         self.callbacks.lock().await.set_generic()
     }
+
+    pub async fn get_place(&mut self) -> Result<Place, Error> {
+        if self.placegotten {
+            return Err(anyhow!("Place already gotten"));
+        }
+        let rx = self.send(ToServerMsg::RequestPlace("binary".to_string()), "binary".to_string()).await?;
+        let r = rx.await??;
+        let data = match r {
+            Callback::Binary(_, d) => d,
+            _ => panic!("Expected binary callback"),
+        };
+        Place::gun_unzip(data).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -276,14 +294,31 @@ pub struct CallbackHandler {
 impl CallbackHandler {
     // insert a callback into the hashmap
     pub fn insert(&mut self, nonce: String, tx: tokio::sync::oneshot::Sender<Result<Callback, Error>>) -> Result<(), Error> {
-        if self.callbacks.insert(nonce, tx).is_some() {
-            Err(anyhow!("Duplicate nonce"))
-        } else {
-            Ok(())
+        // println!("{} Callbacks", self.callbacks.len());
+        // if self.callbacks.insert(nonce, tx).is_some() {
+        //     return Err(anyhow!("Callback already exists"));
+        // }
+        // Ok(())
+        // println!("Inserting callback: {}", nonce);
+        let c = self.callbacks.get_mut(&nonce);
+        match c {
+            Some(orig) => {
+                if orig.is_closed() {
+                    self.callbacks.insert(nonce, tx);
+                    Ok(())
+                } else {
+                    Err(anyhow!("Callback already exists"))
+                }
+            }
+            None => {
+                self.callbacks.insert(nonce, tx);
+                Ok(())
+            }
         }
     }
     // attempt to fulfill a callback, return an error if the callback doesn't exist or somehow fails
     pub fn fulfill(&mut self, nonce: String, callback: Callback) -> Result<(), Error> {
+        // println!("Fulfilling callback: {}", nonce);
         match self.callbacks.remove(&nonce) {
             Some(tx) => {
                 tx.send(Ok(callback)).map_err(|_| anyhow!("Failed to send callback"))?;
