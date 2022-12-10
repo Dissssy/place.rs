@@ -10,9 +10,12 @@ use futures_util::stream::FuturesUnordered;
 use lazy_static::lazy_static;
 mod config;
 use config::Config;
+use place_rs_shared::messages::ToClientMsg;
 use place_rs_shared::messages::ToServerMsg;
 use tokio::sync::oneshot::Receiver;
 use websocket::Callback;
+
+use crate::websocket::RX;
 mod websocket;
 
 lazy_static! {
@@ -43,7 +46,14 @@ async fn main() {
                     Ok(None) => {}
                     Ok(Some(Ok(x))) => {
                         println!("Promise resolved");
-                        println!("Received message: {:?}", x);
+                        match x {
+                            Callback::Message(_, RX::Message(ToClientMsg::ChatMsg(_, msg))) => {
+                                println!("{}\t: {}", msg.user_id, msg.msg);
+                            }
+                            _ => {
+                                println!("Received message: {:?}", x);
+                            }
+                        }
                     }
                     Ok(Some(Err(e))) => {
                         println!("Websocket error: {}", e);
@@ -83,7 +93,14 @@ async fn main() {
                 }
             }
             Some(r) = generic.recv() => {
-                println!("Received message: {:?}", r);
+                match r {
+                    RX::Message(ToClientMsg::ChatMsg(_, msg)) => {
+                        println!("{}\t: {}", msg.user_id, msg.msg);
+                    }
+                    _ => {
+                        println!("Received message: {:?}", r);
+                    }
+                }
             }
         }
     }
