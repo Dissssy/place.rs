@@ -10,7 +10,10 @@ use anyhow::Error;
 use config::Timeouts;
 use interfaces::PostgresConfig;
 use lazy_static::lazy_static;
-use place_rs_shared::messages::{TimeoutType, ToServerMsg};
+use place_rs_shared::{
+    messages::{TimeoutType, ToServerMsg},
+    ChatMsg,
+};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -243,6 +246,29 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
                                 // }
                             } else {
                                 ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), "You have already requested the place".to_string())).unwrap());
+                            }
+                        }
+                        ToServerMsg::ChatMsg(nonce, message) => {
+                            // ensure the user has a name set, and that they are not spamming
+                            if now < timeouts.chat {
+                                ctx.text(serde_json::to_string(&ToClientMsg::TimeoutError(Some(nonce), TimeoutType::Chat(timeouts.chat - now))).unwrap());
+                            } else if let Some(user) = &self.user {
+                                timeouts.chat = now + CONFIG.timeouts.chat;
+                                let r = self.place.lock().unwrap().send_chat_msg(
+                                    ChatMsg {
+                                        user_id: user.id.clone(),
+                                        msg: message,
+                                    },
+                                    Some(nonce.clone()),
+                                );
+                                match r {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), e.to_string())).unwrap());
+                                    }
+                                }
+                            } else {
+                                ctx.text(serde_json::to_string(&ToClientMsg::GenericError(Some(nonce), "You must set a username before chatting".to_string())).unwrap());
                             }
                         }
                     },

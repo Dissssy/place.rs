@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Error};
 use serde::{Deserialize, Serialize};
 
-use crate::{Color, GenericPixelWithLocation, PixelWithLocation, User, XY};
+use crate::{ChatMsg, Color, GenericPixelWithLocation, PixelWithLocation, User, XY};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ToClientMsg {
@@ -10,6 +10,7 @@ pub enum ToClientMsg {
     Heartbeat(Option<String>),
     GenericError(Option<String>, String),
     TimeoutError(Option<String>, TimeoutType),
+    ChatMsg(Option<String>, ChatMsg),
 }
 // NOTE: Client may also receive BINARY data, which is a compressed Place struct
 
@@ -17,6 +18,7 @@ pub enum ToClientMsg {
 pub enum TimeoutType {
     Username(u64),
     Pixel(u64),
+    Chat(u64),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,7 @@ pub enum ToServerMsg {
     SetName(String, String),
     Heartbeat(String),
     RequestPlace(String),
+    ChatMsg(String, String),
 }
 
 impl ToServerMsg {
@@ -49,6 +52,7 @@ impl ToServerMsg {
             "setname" => Ok(ToServerMsg::SetName(nonce, args.next().ok_or_else(|| anyhow!("No name"))?)),
             "heartbeat" => Ok(ToServerMsg::Heartbeat(nonce)),
             "requestplace" => Ok(ToServerMsg::RequestPlace(nonce)),
+            "msg" => Ok(ToServerMsg::ChatMsg(nonce, args.collect::<Vec<String>>().join(" ").trim().to_string())),
             _ => Err(anyhow!("Unknown command")),
         }
     }

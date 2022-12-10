@@ -3,7 +3,7 @@ use anyhow::{anyhow, Error};
 use async_std::stream::StreamExt;
 use futures_util::SinkExt;
 use place_rs_shared::messages::{TimeoutType, ToClientMsg, ToServerMsg};
-use std::{collections::HashMap, f32::consts::E, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message as TMessage;
 
@@ -100,17 +100,74 @@ impl Websocket {
                                             ToClientMsg::Heartbeat(nonce) => {
                                                 // send a heartbeat back to the websocket
                                                 if let Some(nonce) = nonce {
-                                                    let _ = callbacks.lock().await.fulfill(nonce.clone(), Callback::Heartbeat(nonce));
+                                                    let r = callbacks.lock().await.fulfill(nonce.clone(), Callback::Heartbeat(nonce));
+                                                    if let Err(e) = r {
+                                                        println!("Failed to fulfill heartbeat callback: {}", e);
+                                                    }
                                                 }
                                                 let _ = websocket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&ToServerMsg::Heartbeat("UwU".to_string())).unwrap())).await;
                                             },
                                             ToClientMsg::GenericError(Some(nonce), e) => {
-                                                let _ = callbacks.lock().await.fulfill(nonce.clone(), Callback::GenericError(nonce, e.clone()));
+                                                let r = callbacks.lock().await.fulfill(nonce.clone(), Callback::GenericError(nonce, e.clone()));
+                                                if let Err(e) = r {
+                                                    println!("Failed to fulfill generic error callback: {}", e);
+                                                }
                                                 // let _ = rtx.send(RX::GenericError(e));
                                             },
                                             ToClientMsg::TimeoutError(Some(nonce), e) => {
-                                                let _ = callbacks.lock().await.fulfill(nonce.clone(), Callback::TimeoutError(nonce, e.clone()));
+                                                let r = callbacks.lock().await.fulfill(nonce.clone(), Callback::TimeoutError(nonce, e.clone()));
+                                                if let Err(e) = r {
+                                                    println!("Failed to fulfill timeout error callback: {}", e);
+                                                }
                                                 // let _ = rtx.send(RX::TimeoutError(e));
+                                            },
+                                            ToClientMsg::PixelUpdate(nonce, _pixel) => {
+                                                if let Some(nonce) = nonce {
+                                                    let mut c = callbacks.lock().await;
+                                                    if let Err(_e) = c.fulfill(nonce.clone(), Callback::Message(nonce, RX::Message(msg.clone()))) {
+                                                        if let Err(e) = c.send_to_generic(RX::Message(msg)).await {
+                                                            println!("Failed to send user update to generic: {}", e);
+                                                        }
+                                                        // println!("Failed to fulfill pixel update callback: {}", e);
+                                                    }
+                                                } else if let Err(e) = callbacks.lock().await.send_to_generic(RX::Message(msg)).await {
+                                                    println!("Failed to send user update to generic: {}", e);
+                                                }
+                                                // let _ = rtx.send(RX::Message(ToClientMsg::PixelUpdate(Some(nonce), pixel)));
+                                            },
+                                            ToClientMsg::UserUpdate(nonce, _user) => {
+                                                if let Some(nonce) = nonce {
+                                                    let mut c = callbacks.lock().await;
+                                                    if let Err(_e) = c.fulfill(nonce.clone(), Callback::Message(nonce, RX::Message(msg.clone()))) {
+                                                        if let Err(e) = c.send_to_generic(RX::Message(msg)).await {
+                                                            println!("Failed to send user update to generic: {}", e);
+                                                        }
+                                                        // println!("Failed to fulfill pixel update callback: {}", e);
+                                                    }
+                                                } else {
+                                                    let r = callbacks.lock().await.send_to_generic(RX::Message(msg)).await;
+                                                    if let Err(e) = r {
+                                                        println!("Failed to send user update to generic: {}", e);
+                                                    }
+                                                }
+                                                // let _ = rtx.send(RX::Message(ToClientMsg::UserUpdate(Some(nonce), user)));
+                                            },
+                                            ToClientMsg::ChatMsg(nonce, _msg) => {
+                                                if let Some(nonce) = nonce {
+                                                    let mut c = callbacks.lock().await;
+                                                    if let Err(_e) = c.fulfill(nonce.clone(), Callback::Message(nonce, RX::Message(msg.clone()))) {
+                                                        if let Err(e) = c.send_to_generic(RX::Message(msg)).await {
+                                                            println!("Failed to send user update to generic: {}", e);
+                                                        }
+                                                        // println!("Failed to fulfill pixel update callback: {}", e);
+                                                    }
+                                                } else {
+                                                    let r = callbacks.lock().await.send_to_generic(RX::Message(msg)).await;
+                                                    if let Err(e) = r {
+                                                        println!("Failed to send user update to generic: {}", e);
+                                                    }
+                                                }
+                                                // let _ = rtx.send(RX::Message(ToClientMsg::ChatMsg(Some(nonce), msg)));
                                             },
                                             _ => {
                                                 // let _ = rtx.send(RX::Message(msg));
@@ -140,6 +197,7 @@ impl Websocket {
                             }
                             Err(e) => {
                                 // let _ = rtx.send(RX::GenericError(format!("Failed to receive message: {}", e)));
+                                println!("Failed to receive message: {}", e);
                                 break;
                             }
                         }
@@ -157,7 +215,6 @@ impl Websocket {
             callbacks,
         }
     }
-
     pub async fn send(&mut self, msg: ToServerMsg, nonce: String) -> Result<tokio::sync::oneshot::Receiver<Result<Callback, Error>>, Error> {
         // if msg is RequestPlace then nonce will be "binary"
         let mut nonce = nonce;
@@ -185,7 +242,7 @@ impl Websocket {
         state.clone()
     }
 
-    pub async fn connect(&self) -> Result<(), Error> {
+    pub async fn connect(&self) -> Result<tokio::sync::mpsc::Receiver<RX>, Error> {
         // just waiting for the state to change to connected
         loop {
             let state = self.state.lock().await;
@@ -197,7 +254,7 @@ impl Websocket {
             drop(state);
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        Ok(())
+        self.callbacks.lock().await.set_generic()
     }
 }
 
@@ -213,6 +270,7 @@ pub enum Callback {
 #[derive(Debug)]
 pub struct CallbackHandler {
     callbacks: HashMap<String, tokio::sync::oneshot::Sender<Result<Callback, Error>>>,
+    generic: Option<tokio::sync::mpsc::Sender<RX>>,
 }
 
 impl CallbackHandler {
@@ -235,6 +293,31 @@ impl CallbackHandler {
         }
     }
     pub fn new() -> Self {
-        Self { callbacks: HashMap::new() }
+        Self {
+            callbacks: HashMap::new(),
+            generic: None,
+        }
+    }
+    pub fn set_generic(&mut self) -> Result<tokio::sync::mpsc::Receiver<RX>, Error> {
+        if self.generic.is_some() {
+            Err(anyhow!("Generic callback already set"))
+        } else {
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
+            self.generic = Some(tx);
+            // tokio::spawn(async move {
+            //     while let Some(msg) = rx.recv().await {
+            //         println!("Generic callback: {:?}", msg);
+            //     }
+            // });
+            Ok(rx)
+        }
+    }
+    pub async fn send_to_generic(&mut self, msg: RX) -> Result<(), Error> {
+        if let Some(tx) = &mut self.generic {
+            tx.send(msg).await.map_err(|_| anyhow!("Failed to send to generic callback"))?;
+            Ok(())
+        } else {
+            Err(anyhow!("Generic callback not set"))
+        }
     }
 }

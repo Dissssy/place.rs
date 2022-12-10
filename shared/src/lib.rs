@@ -243,6 +243,28 @@ impl MetaPlace {
             Err(anyhow!("Pixel is not a pixel"))
         }
     }
+    pub fn send_chat_msg(&mut self, msg: ChatMsg, nonce: Option<String>) -> Result<(), Error> {
+        // emit chat msg to all clients
+        self.websockets.retain(|ws| !ws.closed);
+        for ws in self.websockets.iter_mut() {
+            let r = if ws.id == msg.user_id {
+                ws.handle.send(ToClientMsg::ChatMsg(nonce.clone(), msg.clone()))
+            } else {
+                ws.handle.send(ToClientMsg::ChatMsg(None, msg.clone()))
+            };
+            if r.is_err() {
+                ws.closed = true;
+            }
+        }
+        self.websockets.retain(|ws| !ws.closed);
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ChatMsg {
+    pub user_id: String,
+    pub msg: String,
 }
 
 pub fn program_path() -> Result<std::path::PathBuf, Error> {
