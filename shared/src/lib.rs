@@ -1,9 +1,12 @@
 #![allow(dead_code)]
 use anyhow::{anyhow, Error};
+use image::GenericImage;
 use messages::ToClientMsg;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use sha2::Sha256;
+use std::io::BufWriter;
+use std::path::PathBuf;
 use std::{
     collections::HashMap,
     fmt::Formatter,
@@ -47,13 +50,52 @@ impl Place {
         });
         Ok(rx.await.unwrap())
     }
+    pub async fn get_img(&self, path: PathBuf) -> Result<(), Error> {
+        // create a new DynamicImage with the same dimensions as the image
+        let mut img = image::DynamicImage::new_rgba8(self.data[0].len() as u32, self.data.len() as u32);
+        for (y, row) in self.data.iter().enumerate() {
+            for (x, pixel) in row.iter().enumerate() {
+                let color = match &pixel.pixel {
+                    MaybePixel::Pixel(p) => p.color,
+                    MaybePixel::None => Color::default(),
+                };
+                img.put_pixel(x as u32, y as u32, image::Rgba([color.r, color.g, color.b, 255]));
+            }
+        }
+        // write the contents of this image to memory
+        let mut buffer = BufWriter::new(std::fs::File::create(path)?);
+        img.write_to(&mut buffer, image::ImageOutputFormat::Png)?;
+        Ok(())
+    }
+    pub fn set_pixel(&mut self, pixel: PixelWithLocation) -> Result<(), Error> {
+        let PixelWithLocation { pixel, location } = pixel;
+        if location.x >= self.data[0].len() as u64 || location.y >= self.data.len() as u64 {
+            return Err(anyhow!("Pixel out of bounds"));
+        }
+        self.data[location.y as usize][location.x as usize] = PixelWithLocation { pixel, location };
+        Ok(())
+    }
+    pub fn get_pixel(&self, location: XY) -> Result<PixelWithLocation, Error> {
+        if location.x >= self.data[0].len() as u64 || location.y >= self.data.len() as u64 {
+            return Err(anyhow!("Pixel out of bounds"));
+        }
+        Ok(self.data[location.y as usize][location.x as usize].clone())
+    }
+    pub fn set_user(&mut self, user: User) -> Result<(), Error> {
+        self.users.insert(user.id.clone(), user);
+        Ok(())
+    }
+    pub fn get_user(&self, id: String) -> Option<User> {
+        self.users.get(&id).cloned()
+    }
 }
 
 pub fn hash(s: String) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(s);
-    let result = hasher.finalize();
-    format!("{:x}", result)
+    // let mut hasher = Sha256::new();
+    // hasher.update(s);
+    // let result = hasher.finalize();
+    // format!("{:x}", result)
+    s
 }
 
 #[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq)]

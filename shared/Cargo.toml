@@ -20,3 +20,4 @@ async-trait = "0.1.59"
 sqlx = { version = "0.6.2", features = ["runtime-tokio-rustls", "macros", "chrono", "uuid", "offline", "postgres"] }
 flate2 = "1.0.25"
 sha2 = "0.10.6"
+image = { version = "0.24.5", features = ["png"] }
