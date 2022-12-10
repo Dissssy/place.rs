@@ -51,7 +51,7 @@ impl ToServerMsg {
             )),
             "setname" => Ok(ToServerMsg::SetName(nonce, args.next().ok_or_else(|| anyhow!("No name"))?)),
             "heartbeat" => Ok(ToServerMsg::Heartbeat(nonce)),
-            "requestplace" => Ok(ToServerMsg::RequestPlace(nonce)),
+            "requestplace" => Ok(ToServerMsg::RequestPlace("binary".to_string())),
             "msg" => Ok(ToServerMsg::ChatMsg(nonce, args.collect::<Vec<String>>().join(" ").trim().to_string())),
             _ => Err(anyhow!("Unknown command")),
         }

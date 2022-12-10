@@ -1,13 +1,14 @@
 #![allow(dead_code)]
+use anyhow::{anyhow, Error};
+use messages::ToClientMsg;
+use serde::{Deserialize, Serialize};
+use sha2::Digest;
+use sha2::Sha256;
 use std::{
     collections::HashMap,
     fmt::Formatter,
     io::{Read, Write},
 };
-
-use anyhow::{anyhow, Error};
-use messages::ToClientMsg;
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 pub mod messages;
 
@@ -46,6 +47,13 @@ impl Place {
         });
         Ok(rx.await.unwrap())
     }
+}
+
+pub fn hash(s: String) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(s);
+    let result = hasher.finalize();
+    format!("{:x}", result)
 }
 
 #[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq)]
@@ -89,8 +97,8 @@ pub struct Pixel {
 }
 #[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq, Copy)]
 pub struct XY {
-    pub x: u16,
-    pub y: u16,
+    pub x: u64,
+    pub y: u64,
 }
 
 impl XY {
@@ -98,8 +106,8 @@ impl XY {
         if vec.is_empty() {
             return Err(anyhow!("Empty vec"));
         }
-        let y = vec.len() as u16;
-        let x = vec[0].len() as u16;
+        let y = vec.len() as u64;
+        let x = vec[0].len() as u64;
         for row in vec {
             if row.len() != x as usize {
                 return Err(anyhow!("Uneven vec"));
@@ -110,9 +118,9 @@ impl XY {
 }
 #[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq, Copy)]
 pub struct Color {
-    r: u8,
-    g: u8,
-    b: u8,
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
 }
 #[derive(Deserialize, Default, Debug, Serialize, Clone, PartialEq, Eq)]
 pub struct User {
