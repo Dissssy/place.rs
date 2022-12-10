@@ -133,10 +133,12 @@ impl Place {
     }
     pub async fn get_info(&self) -> Result<SafeInfo, Error> {
         // get SafeInfo from the /info REST endpoint
-        let url = format!("{}/info", self.rest_url);
+        let url = format!("{}/api/info", self.rest_url);
         let resp = reqwest::get(&url).await?;
-        let info: SafeInfo = resp.json().await?;
-        Ok(info)
+        println!("{}", resp.text().await?);
+        // let info: SafeInfo = resp.json().await?;
+        // Ok(info)
+        todo!()
     }
 }
 

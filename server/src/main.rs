@@ -28,7 +28,7 @@ lazy_static! {
     static ref CONFIG: Config = Config::new().unwrap();
 }
 
-#[get("/info")]
+#[get("/api/info")]
 async fn information() -> impl Responder {
     let info = SafeInfo::new(CONFIG.size);
     web::Json(info)
