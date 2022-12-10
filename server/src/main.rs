@@ -78,22 +78,29 @@ pub struct MetaTimeouts {
     timeouts: HashMap<String, Arc<Mutex<Timeouts>>>,
 }
 
+impl MetaTimeouts {
+    pub async fn get(&mut self, id: &str) -> Arc<Mutex<Timeouts>> {
+        // first we will try to get the timeouts from the hashmap
+        // if it doesn't exist, we will create it, insert it into the hashmap, and return it
+        // if it does exist, we will return it
+        let timeouts = self.timeouts.get(id);
+        match timeouts {
+            Some(t) => t.clone(),
+            None => {
+                let t = Arc::new(Mutex::new(Timeouts::default()));
+                self.timeouts.insert(id.to_string(), t.clone());
+                t
+            }
+        }
+    }
+}
+
 async fn ws(req: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<MetaPlace>>>, timeouts: web::Data<Arc<Mutex<MetaTimeouts>>>) -> Result<HttpResponse, actix_web::Error> {
     let place = data.get_ref().clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let id = hash(req.peer_addr().unwrap().ip().to_string());
     let user = place.lock().unwrap().add_websocket(id.clone(), tx);
-    let titties = timeouts.get_ref().clone();
-    let mut tits = titties.lock().unwrap();
-    let timeouts = if let Some(t) = tits.timeouts.get(&id) {
-        t.clone()
-    } else {
-        // println!("Timeouts not found for {}", id);
-        // println!("Timeouts: {:?}", tits.keys());
-        let t = Arc::new(Mutex::new(Timeouts::default()));
-        tits.timeouts.insert(id.clone(), t.clone());
-        t
-    };
+    let timeouts = timeouts.lock().unwrap().get(&id).await;
     let myws = WsConnection {
         place,
         rx: Some(rx),
