@@ -173,6 +173,12 @@ async fn main() {
                                 println!("Error: {}", e);
                             }
                         }
+                        "export" => {
+                            let r = place.export_img().await;
+                            if let Err(e) = r {
+                                println!("Error: {}", e);
+                            }
+                        }
                         _ => {
                             println!("Unknown command");
                         }
@@ -212,6 +218,12 @@ async fn main() {
             Some(Err(e)) => {
                 println!("Error: {}", e);
                 break;
+            }
+        }
+        if place.changed().await {
+            let r = place.export_img().await;
+            if let Err(e) = r {
+                println!("Error: {}", e);
             }
         }
         //             }
